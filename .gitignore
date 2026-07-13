@@ -1,0 +1,8 @@
+# Isolated worktrees
+.claude/worktrees/
+
+# Dependencies
+node_modules/
+
+# Environment
+.env
