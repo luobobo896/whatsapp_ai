@@ -1,9 +1,11 @@
 package handler
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5"
 	"golang.org/x/crypto/bcrypt"
 
 	"whatsapp-ai-poc/internal/middleware"
@@ -136,17 +138,20 @@ func handleAcceptInvitation(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Email does not match invitation."}})
 			return
 		}
-		if len(req.Password) < 12 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "密码至少 12 个字符。"}})
-			return
-		}
-
 		// Check if user already exists
-		existing, _ := st.UserByEmail(req.Email)
+		existing, err := st.UserByEmail(req.Email)
 		var user *model.UserRow
-		if existing != nil {
+		if err == nil {
+			if bcrypt.CompareHashAndPassword([]byte(existing.PasswordHash), []byte(req.Password)) != nil {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": model.ErrorDetail{Code: "AUTH_INVALID", Message: "邮箱或密码不正确。"}})
+				return
+			}
 			user = existing
-		} else {
+		} else if errors.Is(err, pgx.ErrNoRows) {
+			if len(req.Password) < 12 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "密码至少 12 个字符。"}})
+				return
+			}
 			hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to create user."}})
@@ -157,6 +162,9 @@ func handleAcceptInvitation(st *store.Store) gin.HandlerFunc {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to create user."}})
 				return
 			}
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to look up user."}})
+			return
 		}
 
 		// Add to tenant
@@ -171,8 +179,14 @@ func handleAcceptInvitation(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to create session."}})
 			return
 		}
-		st.UpdateSessionTenant(sess.ID, inv.TenantID)
-		st.DeleteInvitation(inv.ID)
+		if err := st.UpdateSessionTenant(sess.ID, inv.TenantID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to select tenant."}})
+			return
+		}
+		if err := st.DeleteInvitation(inv.ID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to complete invitation."}})
+			return
+		}
 
 		c.SetSameSite(http.SameSiteLaxMode)
 		c.SetCookie("session_id", sess.ID, 86400, "/", "", sessionCookieSecure(), true)
