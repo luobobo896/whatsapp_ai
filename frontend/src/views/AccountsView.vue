@@ -1,9 +1,17 @@
 <script setup>
-import { Headphones, Plus } from "lucide-vue-next";
+import { ref } from "vue";
+import { Headphones, MessageCircle, Plus, Plug, QrCode } from "lucide-vue-next";
 import { formatDate } from "../utils";
+import QrLoginCard from "../components/QrLoginCard.vue";
 
-defineProps({ accounts: Array, canManage: Boolean });
-const emit = defineEmits(["create"]);
+const props = defineProps({ accounts: Array, canManage: Boolean, csrfToken: String });
+const emit = defineEmits(["create", "chat"]);
+const qrAccount = ref(null);
+
+function onAccountChanged() {
+  qrAccount.value = null;
+  emit("changed");
+}
 </script>
 
 <template>
@@ -36,6 +44,53 @@ const emit = defineEmits(["create"]);
       <el-table-column label="创建时间">
         <template #default="{ row }">{{ formatDate(row.createdAt) }}</template>
       </el-table-column>
+      <el-table-column label="操作" width="220">
+        <template #default="{ row }">
+          <el-button
+            v-if="row.status !== 'connected'"
+            size="small"
+            type="primary"
+            :icon="QrCode"
+            @click="qrAccount = row"
+          >
+            扫码登录
+          </el-button>
+          <el-button
+            v-if="row.status === 'connected'"
+            size="small"
+            type="success"
+            :icon="MessageCircle"
+            @click="emit('chat', row)"
+          >
+            进入聊天
+          </el-button>
+          <el-button
+            v-if="row.status === 'connected'"
+            size="small"
+            :icon="Plug"
+            @click="qrAccount = row"
+          >
+            管理连接
+          </el-button>
+        </template>
+      </el-table-column>
     </el-table>
   </el-card>
+
+  <!-- QR Login Dialog -->
+  <el-dialog
+    v-if="qrAccount"
+    model-value
+    title="WhatsApp 扫码登录"
+    width="500px"
+    @close="qrAccount = null"
+  >
+    <QrLoginCard
+      :account="qrAccount"
+      :csrf-token="csrfToken"
+      @close="qrAccount = null"
+      @connected="onAccountChanged"
+      @disconnected="onAccountChanged"
+    />
+  </el-dialog>
 </template>

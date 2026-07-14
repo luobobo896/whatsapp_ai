@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -27,7 +28,8 @@ func handleListConversations(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "TENANT_REQUIRED", Message: "No tenant selected."}})
 			return
 		}
-		summaries, err := st.ListConversationSummaries(session.ActiveTenantID)
+		accountID := c.Query("accountId")
+		summaries, err := st.ListConversationSummaries(session.ActiveTenantID, accountID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to load conversations."}})
 			return
@@ -52,7 +54,7 @@ func handleConversationQuery(st *store.Store) gin.HandlerFunc {
 		if req.MaxKnowledge <= 0 { req.MaxKnowledge = 5 }
 
 		// 1. Save customer message
-		st.SaveMessage(session.ActiveTenantID, req.ConversationID, req.CustomerName, "customer", req.Message, "[]")
+		st.SaveMessage(session.ActiveTenantID, req.AccountID, req.ConversationID, req.CustomerName, "customer", req.Message, "[]")
 
 		// 2. Search knowledge
 		results, searchErr := st.SearchKnowledge(session.ActiveTenantID, req.Message, nil, req.MaxKnowledge)
@@ -103,7 +105,7 @@ func handleSaveMessage(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Invalid request."}})
 			return
 		}
-		msg, err := st.SaveMessage(session.ActiveTenantID, req.ConversationID, req.CustomerName, req.Role, req.Content, req.KnowledgeIDs)
+		msg, err := st.SaveMessage(session.ActiveTenantID, req.AccountID, req.ConversationID, req.CustomerName, req.Role, req.Content, req.KnowledgeIDs)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to save message."}})
 			return
@@ -119,7 +121,12 @@ func handleMessages(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "TENANT_REQUIRED", Message: "No tenant selected."}})
 			return
 		}
-		limit := 20
+		limit := 30
+		if l := c.Query("limit"); l != "" {
+			if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
+				limit = parsed
+			}
+		}
 		msgs, err := st.LoadHistory(session.ActiveTenantID, c.Param("id"), limit)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to load messages."}})

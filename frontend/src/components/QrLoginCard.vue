@@ -1,0 +1,212 @@
+<script setup>
+import { ref, computed, inject, onUnmounted } from "vue";
+import { QrCode, RefreshCw, Unplug } from "lucide-vue-next";
+import { get, post, messageForError } from "../api";
+
+const props = defineProps({ account: Object, csrfToken: String });
+const emit = defineEmits(["close", "connected", "disconnected"]);
+const showToast = inject("showToast");
+
+const qrData = ref("");
+const countdown = ref(0);
+const status = ref(props.account.status || "pending");
+const loading = ref(false);
+const errorMsg = ref("");
+let timer = null;
+let pollTimer = null;
+
+onUnmounted(() => {
+  clearInterval(timer);
+  clearInterval(pollTimer);
+});
+
+function renderQrToDataUrl(raw) {
+  const lines = raw.split("\n");
+  const qrLines = [];
+  for (const line of lines) {
+    // Preserve leading/trailing spaces — they are white QR cells
+    const clean = line.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").replace(/\x1b/g, "").replace(/\r/g, "");
+    if (!clean.trim()) continue;
+    if (/[▄▀█▌▐▖▗▘▙▚▛▜▝▞▟]/.test(clean)) {
+      qrLines.push(clean);
+    }
+  }
+  if (!qrLines.length) return null;
+
+  const rows = qrLines.length * 2;
+  const cols = Math.max(...qrLines.map(l => [...l].length));
+  if (cols === 0 || rows === 0) return null;
+
+  const grid = [];
+  for (let r = 0; r < rows; r++) grid.push(new Array(cols).fill(false));
+
+  for (let i = 0; i < qrLines.length; i++) {
+    const chars = [...qrLines[i]];
+    for (let j = 0; j < chars.length; j++) {
+      const ch = chars[j];
+      const top = i * 2, bottom = i * 2 + 1;
+      switch (ch) {
+        case "█": grid[top][j] = true; grid[bottom][j] = true; break;
+        case "▀": grid[top][j] = true; break;
+        case "▄": grid[bottom][j] = true; break;
+        default: if (/[▌▐▖▗▘▙▚▛▜▝▞▟■]/.test(ch)) { grid[top][j] = true; grid[bottom][j] = true; }
+      }
+    }
+  }
+
+  const scale = 6;
+  const canvas = document.createElement("canvas");
+  canvas.width = cols * scale;
+  canvas.height = rows * scale;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#000";
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (grid[r][c]) ctx.fillRect(c * scale, r * scale, scale, scale);
+    }
+  }
+  return canvas.toDataURL("image/png");
+}
+
+const qrImageUrl = computed(() => {
+  if (!qrData.value) return null;
+  if (qrData.value.startsWith("data:image")) return qrData.value;
+  return renderQrToDataUrl(qrData.value);
+});
+
+function formatTime(s) {
+  const m = Math.floor(s / 60);
+  const sec = s % 60;
+  return `${m}:${String(sec).padStart(2, "0")}`;
+}
+
+async function fetchQr() {
+  loading.value = true;
+  errorMsg.value = "";
+  try {
+    const resp = await post(`/api/accounts/${props.account.id}/qr-login`, {}, props.csrfToken);
+    qrData.value = resp.qrData;
+    const expires = new Date(resp.expiresAt).getTime();
+    const now = Date.now();
+    countdown.value = Math.max(0, Math.floor((expires - now) / 1000));
+    status.value = "qr_pending";
+    startCountdown();
+    startPolling();
+  } catch (e) {
+    errorMsg.value = messageForError(e);
+    showToast({ tone: "error", message: errorMsg.value });
+  } finally {
+    loading.value = false;
+  }
+}
+
+function startCountdown() {
+  clearInterval(timer);
+  timer = setInterval(() => {
+    countdown.value--;
+    if (countdown.value <= 0) {
+      clearInterval(timer);
+      status.value = "expired";
+    }
+  }, 1000);
+}
+
+function startPolling() {
+  clearInterval(pollTimer);
+  pollTimer = setInterval(async () => {
+    try {
+      const resp = await get(`/api/accounts/${props.account.id}/qr-status`);
+      if (resp.status === "connected") {
+        clearInterval(timer);
+        clearInterval(pollTimer);
+        status.value = "connected";
+        showToast({ tone: "success", message: "WhatsApp 已连接" });
+        emit("connected");
+      }
+    } catch { /* ignore */ }
+  }, 3000);
+}
+
+async function disconnect() {
+  loading.value = true;
+  try {
+    await post(`/api/accounts/${props.account.id}/disconnect`, {}, props.csrfToken);
+    status.value = "pending";
+    clearInterval(timer);
+    clearInterval(pollTimer);
+    countdown.value = 0;
+    showToast({ tone: "info", message: "WhatsApp 已断开连接" });
+    emit("disconnected");
+  } catch (e) {
+    showToast({ tone: "error", message: messageForError(e) });
+  } finally {
+    loading.value = false;
+  }
+}
+</script>
+
+<template>
+  <el-card shadow="never" style="max-width:500px;margin:0 auto">
+    <template #header>
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <span style="font-weight:600">{{ account.name }} — 扫码登录</span>
+        <el-tag
+          :type="status === 'connected' ? 'success' : status === 'expired' ? 'danger' : 'warning'"
+          size="small"
+        >
+          {{ status === "connected" ? "已连接" : status === "expired" ? "已过期" : status === "qr_pending" ? "等待扫码" : "待连接" }}
+        </el-tag>
+      </div>
+    </template>
+
+    <!-- Connected -->
+    <div v-if="status === 'connected'" style="text-align:center;padding:24px 0">
+      <div style="width:64px;height:64px;border-radius:50%;background:#e6f7ed;display:inline-flex;align-items:center;justify-content:center;margin-bottom:12px">
+        <QrCode :size="32" style="color:#1fa855" />
+      </div>
+      <p style="font-size:16px;font-weight:600;color:#1fa855;margin:0">WhatsApp 已连接</p>
+      <p style="font-size:12px;color:#6b736d;margin:8px 0 20px">客服账号已成功对接 WhatsApp</p>
+      <el-button type="danger" :icon="Unplug" :loading="loading" @click="disconnect">断开连接</el-button>
+    </div>
+
+    <!-- QR showing: canvas-rendered image + countdown -->
+    <div v-else-if="qrImageUrl" style="text-align:center">
+      <img
+        :src="qrImageUrl"
+        style="max-width:100%;height:auto;border:8px solid #fff;border-radius:4px;background:#fff;display:block;margin:0 auto"
+        alt="WhatsApp QR Code"
+      />
+      <div style="margin:12px 0 8px">
+        <el-progress
+          :percentage="Math.round((countdown / 30) * 100)"
+          :color="countdown <= 5 ? '#d94535' : '#128c7e'"
+          :stroke-width="6"
+        />
+      </div>
+      <p style="font-size:13px;color:#6b736d;margin:0 0 8px">
+        二维码有效期剩余 <strong :style="{ color: countdown <= 5 ? '#d94535' : '#128c7e' }">{{ formatTime(countdown) }}</strong>
+      </p>
+    </div>
+
+    <!-- Expired -->
+    <div v-else-if="status === 'expired'" style="text-align:center;padding:24px 0">
+      <p style="color:#d94535;margin-bottom:16px">二维码已过期，请重新获取</p>
+      <el-button type="primary" :icon="RefreshCw" :loading="loading" @click="fetchQr">重新获取二维码</el-button>
+    </div>
+
+    <!-- Initial state -->
+    <div v-else style="text-align:center;padding:24px 0">
+      <div style="width:64px;height:64px;border-radius:50%;background:#f5f7fa;display:inline-flex;align-items:center;justify-content:center;margin-bottom:12px">
+        <QrCode :size="32" style="color:#6b736d" />
+      </div>
+      <p style="color:#6b736d;margin-bottom:16px">点击下方按钮获取 WhatsApp 登录二维码</p>
+      <el-button type="primary" :icon="QrCode" :loading="loading" @click="fetchQr">扫码登录</el-button>
+    </div>
+
+    <div v-if="errorMsg" style="margin-top:8px;text-align:center">
+      <span style="color:#d94535;font-size:12px">{{ errorMsg }}</span>
+    </div>
+  </el-card>
+</template>

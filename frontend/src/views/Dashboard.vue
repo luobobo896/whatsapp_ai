@@ -22,6 +22,7 @@ import TenantCredentialsResult from "../components/TenantCredentialsResult.vue";
 import InvitationResult from "../components/InvitationResult.vue";
 import KnowledgeDetail from "./KnowledgeDetail.vue";
 import EditKnowledgeDialog from "../components/EditKnowledgeDialog.vue";
+import ChatView from "../components/ChatView.vue";
 
 const { session } = useSession();
 const router = useRouter();
@@ -69,6 +70,7 @@ const tenantCredentials = ref(null);
 const editKnowledgeOpen = ref(false);
 const editingKnowledgeBase = ref(null);
 const knowledgeBaseId = ref(null);
+const chatAccount = ref(null);
 
 const activeTenant = computed(() =>
   tenants.value.find((t) => t.id === session.value?.activeTenantId) || null,
@@ -241,7 +243,13 @@ function navigate(v) {
           :accounts="accounts" :knowledge-bases="knowledgeBases" :conversations="conversations"
           :platform-role="platformRole" @navigate="navigate"
         />
-        <AccountsView v-if="!loading && view === 'accounts'" :accounts="accounts" :can-manage="canManageAccounts" @create="createAccountOpen = true" />
+        <AccountsView
+          v-if="!loading && view === 'accounts'"
+          :accounts="accounts" :can-manage="canManageAccounts" :csrf-token="session?.csrfToken"
+          @create="createAccountOpen = true"
+          @chat="(acct) => { chatAccount = acct; view = 'chat' }"
+          @changed="loadData()"
+        />
         <KnowledgeView
           v-if="!loading && view === 'knowledge'"
           :bases="knowledgeBases" :can-manage="canManageKnowledge"
@@ -261,7 +269,13 @@ function navigate(v) {
           @base-updated="() => { editingKnowledgeBase = selectedKnowledgeBase; editKnowledgeOpen = true; }"
           @articles-changed="loadData()"
         />
-        <ConversationsView v-if="!loading && view === 'conversations'" :conversations="conversations" :accounts="accounts" />
+        <ConversationsView v-if="!loading && view === 'conversations'" :conversations="conversations" :accounts="accounts" @chat="(acct) => { chatAccount = acct; view = 'chat' }" />
+        <ChatView
+          v-if="!loading && view === 'chat' && chatAccount"
+          :account="chatAccount"
+          :csrf-token="session?.csrfToken"
+          @back="view = 'accounts'"
+        />
         <TenantsView
           v-if="!loading && view === 'tenants'" :tenants="tenants" :platform-role="platformRole"
           :active-tenant-id="session?.activeTenantId" :csrf-token="session?.csrfToken"

@@ -15,6 +15,7 @@ const ERROR_MESSAGES = {
   FORBIDDEN: "当前账号没有执行此操作的权限。",
   TENANT_SUSPENDED: "当前租户已暂停服务。",
   RATE_LIMITED: "操作过于频繁，请稍后重试。",
+  OPENCLAW_ERROR: "OpenClaw 服务异常，请检查 OpenClaw 是否正常运行。",
 };
 
 export function messageForError(error) {
@@ -75,6 +76,14 @@ export function del(path, csrfToken) {
 export function patch(path, body, csrfToken) {
   return request(path, {
     method: "PATCH",
+    body: JSON.stringify(body),
+    headers: { "X-CSRF-Token": csrfToken },
+  });
+}
+
+export function put(path, body, csrfToken) {
+  return request(path, {
+    method: "PUT",
     body: JSON.stringify(body),
     headers: { "X-CSRF-Token": csrfToken },
   });

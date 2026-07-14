@@ -148,6 +148,11 @@ func (s *Store) migrate(ctx context.Context) error {
 	s.pool.Exec(context.Background(), `DROP TRIGGER IF EXISTS trg_articles_search ON knowledge_articles`)
 	s.pool.Exec(context.Background(), `CREATE TRIGGER trg_articles_search BEFORE INSERT OR UPDATE ON knowledge_articles FOR EACH ROW EXECUTE FUNCTION articles_search_update()`)
 	s.pool.Exec(context.Background(), `UPDATE knowledge_articles SET search_vector = setweight(to_tsvector('simple', COALESCE(title, '')), 'A') || setweight(to_tsvector('simple', COALESCE(content, '')), 'B') || setweight(to_tsvector('simple', COALESCE(category, '')), 'C') || setweight(to_tsvector('simple', COALESCE(attributes, '')), 'D') WHERE search_vector IS NULL`)
+	// Account extensions
+	s.pool.Exec(context.Background(), `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS kb_id TEXT NOT NULL DEFAULT ''`)
+	s.pool.Exec(context.Background(), `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS reply_limit INTEGER NOT NULL DEFAULT 30`)
+		s.pool.Exec(context.Background(), `ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT ''`)
+		s.pool.Exec(context.Background(), `CREATE INDEX IF NOT EXISTS idx_conv_msg_account ON conversation_messages(tenant_id, account_id, created_at)`)
 	return nil
 }
 
@@ -425,7 +430,7 @@ func (s *Store) DeleteInvitation( id string) error {
 
 func (s *Store) AccountsByTenant( tenantID string) ([]model.Account, error) {
 	rows, err := s.pool.Query(context.Background(),
-		`SELECT id,name,account_key,status,daily_limit,
+		`SELECT id,name,account_key,status,daily_limit,kb_id,reply_limit,
 		        to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')
 		 FROM accounts WHERE tenant_id=$1 ORDER BY created_at`, tenantID)
 	if err != nil {
@@ -435,7 +440,7 @@ func (s *Store) AccountsByTenant( tenantID string) ([]model.Account, error) {
 	var list []model.Account
 	for rows.Next() {
 		var a model.Account
-		if err := rows.Scan(&a.ID, &a.Name, &a.AccountKey, &a.Status, &a.DailyLimit, &a.CreatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.Name, &a.AccountKey, &a.Status, &a.DailyLimit, &a.KbID, &a.ReplyLimit, &a.CreatedAt); err != nil {
 			return nil, err
 		}
 		list = append(list, a)
@@ -443,20 +448,50 @@ func (s *Store) AccountsByTenant( tenantID string) ([]model.Account, error) {
 	return list, rows.Err()
 }
 
-func (s *Store) CreateAccount( tenantID, name string, dailyLimit int) (*model.AccountRow, error) {
+func (s *Store) CreateAccount( tenantID, name, kbID string, dailyLimit, replyLimit int) (*model.AccountRow, error) {
 	a := &model.AccountRow{
-		ID: genID(), TenantID: tenantID, Name: name,
-		AccountKey: "wa_" + genID()[:8], Status: "pending", DailyLimit: dailyLimit,
+		ID: genID(), TenantID: tenantID, Name: name, KbID: kbID,
+		AccountKey: "wa_" + genID()[:8], Status: "pending", DailyLimit: dailyLimit, ReplyLimit: replyLimit,
 	}
 	err := s.pool.QueryRow(context.Background(),
-		`INSERT INTO accounts (id,tenant_id,name,account_key,status,daily_limit)
-		 VALUES ($1,$2,$3,$4,$5,$6)
+		`INSERT INTO accounts (id,tenant_id,name,account_key,status,daily_limit,kb_id,reply_limit)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
 		 RETURNING to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')`,
-		a.ID, a.TenantID, a.Name, a.AccountKey, a.Status, a.DailyLimit,
+		a.ID, a.TenantID, a.Name, a.AccountKey, a.Status, a.DailyLimit, a.KbID, a.ReplyLimit,
 	).Scan(&a.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
+	return a, nil
+}
+
+func (s *Store) AccountByID( tenantID, accountID string) (*model.AccountRow, error) {
+	a := &model.AccountRow{}
+	err := s.pool.QueryRow(context.Background(),
+		`SELECT id,tenant_id,name,account_key,status,daily_limit,kb_id,reply_limit,
+		        to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')
+		 FROM accounts WHERE id=$1 AND tenant_id=$2`, accountID, tenantID,
+	).Scan(&a.ID, &a.TenantID, &a.Name, &a.AccountKey, &a.Status, &a.DailyLimit, &a.KbID, &a.ReplyLimit, &a.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return a, nil
+}
+
+func (s *Store) UpdateAccount( tenantID, accountID, name, kbID, status string, dailyLimit, replyLimit *int) (*model.AccountRow, error) {
+	q := `UPDATE accounts SET `
+	args := []any{}
+	idx := 1
+	if name != "" { q += fmt.Sprintf(`name=$%d, `, idx); args = append(args, name); idx++ }
+	if kbID != "" { q += fmt.Sprintf(`kb_id=$%d, `, idx); args = append(args, kbID); idx++ }
+	if status != "" { q += fmt.Sprintf(`status=$%d, `, idx); args = append(args, status); idx++ }
+	if dailyLimit != nil { q += fmt.Sprintf(`daily_limit=$%d, `, idx); args = append(args, *dailyLimit); idx++ }
+	if replyLimit != nil { q += fmt.Sprintf(`reply_limit=$%d, `, idx); args = append(args, *replyLimit); idx++ }
+	q = q[:len(q)-2] + fmt.Sprintf(` WHERE id=$%d AND tenant_id=$%d RETURNING id,tenant_id,name,account_key,status,daily_limit,kb_id,reply_limit,to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')`, idx, idx+1)
+	args = append(args, accountID, tenantID)
+	a := &model.AccountRow{}
+	err := s.pool.QueryRow(context.Background(), q, args...).Scan(&a.ID, &a.TenantID, &a.Name, &a.AccountKey, &a.Status, &a.DailyLimit, &a.KbID, &a.ReplyLimit, &a.CreatedAt)
+	if err != nil { return nil, err }
 	return a, nil
 }
 
@@ -663,14 +698,14 @@ func splitQuery(q string) []string {
 	return result
 }
 
-func (s *Store) SaveMessage( tenantID, conversationID, customerName, role, content, knowledgeIDs string) (*model.ConversationMessage, error) {
+func (s *Store) SaveMessage( tenantID, accountID, conversationID, customerName, role, content, knowledgeIDs string) (*model.ConversationMessage, error) {
 	m := &model.ConversationMessage{
 		ID: genID(), ConversationID: conversationID, CustomerName: customerName,
 		Role: role, Content: content, KnowledgeIDs: knowledgeIDs,
 	}
 	err := s.pool.QueryRow(context.Background(),
-		"INSERT INTO conversation_messages (id,tenant_id,conversation_id,customer_name,role,content,knowledge_ids) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')",
-		m.ID, tenantID, m.ConversationID, m.CustomerName, m.Role, m.Content, m.KnowledgeIDs,
+		"INSERT INTO conversation_messages (id,tenant_id,account_id,conversation_id,customer_name,role,content,knowledge_ids) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')",
+		m.ID, tenantID, accountID, m.ConversationID, m.CustomerName, m.Role, m.Content, m.KnowledgeIDs,
 	).Scan(&m.CreatedAt)
 	if err != nil { return nil, err }
 	return m, nil
@@ -679,14 +714,14 @@ func (s *Store) SaveMessage( tenantID, conversationID, customerName, role, conte
 func (s *Store) LoadHistory( tenantID, conversationID string, limit int) ([]model.ConversationMessage, error) {
 	if limit <= 0 { limit = 20 }
 	rows, err := s.pool.Query(context.Background(),
-		"SELECT id,conversation_id,customer_name,role,content,knowledge_ids,to_char(created_at, 'YYYY-MM-DD HH24:MI:SS') FROM conversation_messages WHERE tenant_id=$1 AND conversation_id=$2 ORDER BY created_at DESC LIMIT $3",
+		"SELECT id,conversation_id,account_id,customer_name,role,content,knowledge_ids,to_char(created_at, 'YYYY-MM-DD HH24:MI:SS') FROM conversation_messages WHERE tenant_id=$1 AND conversation_id=$2 ORDER BY created_at DESC LIMIT $3",
 		tenantID, conversationID, limit)
 	if err != nil { return nil, err }
 	defer rows.Close()
 	var list []model.ConversationMessage
 	for rows.Next() {
 		var m model.ConversationMessage
-		if err := rows.Scan(&m.ID, &m.ConversationID, &m.CustomerName, &m.Role, &m.Content, &m.KnowledgeIDs, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.ConversationID, &m.AccountID, &m.CustomerName, &m.Role, &m.Content, &m.KnowledgeIDs, &m.CreatedAt); err != nil {
 			return nil, err
 		}
 		list = append(list, m)
@@ -695,9 +730,15 @@ func (s *Store) LoadHistory( tenantID, conversationID string, limit int) ([]mode
 	return list, rows.Err()
 }
 
-func (s *Store) ListConversationSummaries( tenantID string) ([]model.ConversationSummary, error) {
-	rows, err := s.pool.Query(context.Background(),
-		"SELECT conversation_id, customer_name, (SELECT content FROM conversation_messages cm2 WHERE cm2.tenant_id=$1 AND cm2.conversation_id=cm.conversation_id ORDER BY created_at DESC LIMIT 1) AS last_message, (SELECT to_char(created_at, 'YYYY-MM-DD HH24:MI:SS') FROM conversation_messages cm3 WHERE cm3.tenant_id=$1 AND cm3.conversation_id=cm.conversation_id ORDER BY created_at DESC LIMIT 1) AS last_message_at, COUNT(*) AS message_count FROM conversation_messages cm WHERE tenant_id=$1 GROUP BY conversation_id, customer_name ORDER BY last_message_at DESC", tenantID)
+func (s *Store) ListConversationSummaries( tenantID, accountID string) ([]model.ConversationSummary, error) {
+	q := `SELECT conversation_id, customer_name, (SELECT content FROM conversation_messages cm2 WHERE cm2.tenant_id=$1 AND cm2.conversation_id=cm.conversation_id ORDER BY created_at DESC LIMIT 1) AS last_message, (SELECT to_char(created_at, 'YYYY-MM-DD HH24:MI:SS') FROM conversation_messages cm3 WHERE cm3.tenant_id=$1 AND cm3.conversation_id=cm.conversation_id ORDER BY created_at DESC LIMIT 1) AS last_message_at, COUNT(*) AS message_count FROM conversation_messages cm WHERE tenant_id=$1`
+	args := []any{tenantID}
+	if accountID != "" {
+		q += ` AND account_id=$2`
+		args = append(args, accountID)
+	}
+	q += ` GROUP BY conversation_id, customer_name ORDER BY last_message_at DESC`
+	rows, err := s.pool.Query(context.Background(), q, args...)
 	if err != nil { return nil, err }
 	defer rows.Close()
 	var list []model.ConversationSummary

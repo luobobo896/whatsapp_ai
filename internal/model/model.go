@@ -19,6 +19,8 @@ type CreateTenantRequest struct {
 type CreateAccountRequest struct {
 	Name       string `json:"name"`
 	DailyLimit int    `json:"dailyLimit"`
+	KbID       string `json:"kbId"`
+	ReplyLimit int    `json:"replyLimit"`
 }
 
 type CreateKnowledgeRequest struct {
@@ -45,6 +47,27 @@ type UpdateMemberRequest struct {
 type UpdateTenantStatusRequest struct {
 	Status string `json:"status"`
 	Reason string `json:"reason"`
+}
+
+type UpdateAccountRequest struct {
+	Name       string `json:"name,omitempty"`
+	KbID       string `json:"kbId,omitempty"`
+	Status     string `json:"status,omitempty"`
+	DailyLimit *int   `json:"dailyLimit,omitempty"`
+	ReplyLimit *int   `json:"replyLimit,omitempty"`
+}
+
+// -- OpenClaw QR login --
+
+type QrLoginResponse struct {
+	QrData    string `json:"qrData"`
+	ExpiresAt string `json:"expiresAt"`
+	AccountID string `json:"accountId"`
+}
+
+type AccountStatusResponse struct {
+	Status      string `json:"status"`
+	ConnectedAt string `json:"connectedAt,omitempty"`
 }
 
 type ErrorDetail struct {
@@ -137,6 +160,8 @@ type Account struct {
 	AccountKey string `json:"accountKey"`
 	Status     string `json:"status"`
 	DailyLimit int    `json:"dailyLimit"`
+	KbID       string `json:"kbId"`
+	ReplyLimit int    `json:"replyLimit"`
 	CreatedAt  string `json:"createdAt"`
 }
 
@@ -224,6 +249,7 @@ type SearchResponse struct {
 type ConversationMessage struct {
 	ID             string `json:"id"`
 	ConversationID string `json:"conversationId"`
+	AccountID      string `json:"accountId"`
 	CustomerName   string `json:"customerName"`
 	Role           string `json:"role"`
 	Content        string `json:"content"`
@@ -237,6 +263,7 @@ type ConversationMessagesResponse struct {
 
 type SaveMessageRequest struct {
 	ConversationID string `json:"conversationId"`
+	AccountID      string `json:"accountId"`
 	CustomerName   string `json:"customerName"`
 	Role           string `json:"role"`
 	Content        string `json:"content"`
@@ -362,6 +389,8 @@ type AccountRow struct {
 	AccountKey string
 	Status     string
 	DailyLimit int
+	KbID       string
+	ReplyLimit int
 	CreatedAt  string
 }
 
