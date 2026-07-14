@@ -90,7 +90,11 @@ func handleInternalConversationQuery(st *store.Store) gin.HandlerFunc {
 		}
 
 		// 2. Search only the knowledge bases bound to this account.
-		results, _ := st.SearchKnowledgeForBases(tenantID, accountKnowledgeBaseIDs(acctRow), req.Message, nil, req.MaxKnowledge)
+		results, err := st.SearchKnowledgeForBases(tenantID, accountKnowledgeBaseIDs(acctRow), req.Message, nil, req.MaxKnowledge)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to search knowledge."}})
+			return
+		}
 
 		accountName := "客服"
 		if acctRow.Name != "" {
@@ -109,11 +113,18 @@ func handleInternalConversationQuery(st *store.Store) gin.HandlerFunc {
 			for _, m := range req.History {
 				role := m.Role
 				if role == "user" { role = "customer" }
-				st.SaveMessageIfAbsent(tenantID, req.AccountID, req.ConversationID, req.CustomerName, role, m.Content, "[]")
+				if err := st.SaveMessageIfAbsent(tenantID, req.AccountID, req.ConversationID, req.CustomerName, role, m.Content, "[]"); err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to save conversation history."}})
+					return
+				}
 				history = append(history, model.HistoryMessage{Role: m.Role, Content: m.Content})
 			}
 		} else {
-			msgs, _ := st.LoadHistory(tenantID, req.ConversationID, req.MaxHistory)
+			msgs, err := st.LoadHistory(tenantID, req.ConversationID, req.MaxHistory)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to load conversation history."}})
+				return
+			}
 			history = make([]model.HistoryMessage, len(msgs))
 			for i, m := range msgs {
 				history[len(msgs)-1-i] = model.HistoryMessage{Role: m.Role, Content: m.Content}
@@ -223,7 +234,11 @@ func handleConversationQuery(st *store.Store) gin.HandlerFunc {
 		}
 
 		// 2. Search knowledge
-		results, _ := st.SearchKnowledgeForBases(session.ActiveTenantID, accountKnowledgeBaseIDs(account), req.Message, nil, req.MaxKnowledge)
+		results, err := st.SearchKnowledgeForBases(session.ActiveTenantID, accountKnowledgeBaseIDs(account), req.Message, nil, req.MaxKnowledge)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to search knowledge."}})
+			return
+		}
 
 		// 2a. Hard gate: when knowledge is empty, force a canned fallback reply
 		// so the LLM never gets a chance to free-style outside the knowledge base.
@@ -242,12 +257,19 @@ func handleConversationQuery(st *store.Store) gin.HandlerFunc {
 			for _, m := range req.History {
 				role := m.Role
 				if role == "user" { role = "customer" }
-				st.SaveMessageIfAbsent(session.ActiveTenantID, req.AccountID, req.ConversationID, req.CustomerName, role, m.Content, "[]")
+				if err := st.SaveMessageIfAbsent(session.ActiveTenantID, req.AccountID, req.ConversationID, req.CustomerName, role, m.Content, "[]"); err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to save conversation history."}})
+					return
+				}
 				history = append(history, model.HistoryMessage{Role: m.Role, Content: m.Content})
 			}
 		} else {
 			// Fall back to local DB (reverse DESC result back to chronological order).
-			msgs, _ := st.LoadHistory(session.ActiveTenantID, req.ConversationID, req.MaxHistory)
+			msgs, err := st.LoadHistory(session.ActiveTenantID, req.ConversationID, req.MaxHistory)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to load conversation history."}})
+				return
+			}
 			history = make([]model.HistoryMessage, len(msgs))
 			for i, m := range msgs {
 				history[len(msgs)-1-i] = model.HistoryMessage{Role: m.Role, Content: m.Content}

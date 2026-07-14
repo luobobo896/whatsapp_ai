@@ -74,8 +74,8 @@ async function sendReply() {
     replyText.value = "";
     // Reload messages
     await loadMessages(selectedConv.value);
-  } catch {
-    /* ignore */
+  } catch (error) {
+    showToast({ tone: "error", message: messageForError(error) });
   } finally {
     sending.value = false;
   }

@@ -830,19 +830,24 @@ func (s *Store) SaveMessage( tenantID, accountID, conversationID, customerName, 
 // SaveMessageIfAbsent saves a message only when an identical one (same conversation,
 // role, and content) does not already exist. Used to persist OpenClaw-provided
 // history without creating duplicates on repeated calls.
-func (s *Store) SaveMessageIfAbsent(tenantID, accountID, conversationID, customerName, role, content, knowledgeIDs string) {
+func (s *Store) SaveMessageIfAbsent(tenantID, accountID, conversationID, customerName, role, content, knowledgeIDs string) error {
 	// Check existence first to avoid the INSERT overhead on the hot path.
 	var exists bool
-	s.pool.QueryRow(context.Background(),
+	if err := s.pool.QueryRow(context.Background(),
 		"SELECT EXISTS(SELECT 1 FROM conversation_messages WHERE tenant_id=$1 AND conversation_id=$2 AND role=$3 AND content=$4)",
 		tenantID, conversationID, role, content,
-	).Scan(&exists)
-	if exists { return }
+	).Scan(&exists); err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
 	id := genID()
-	s.pool.Exec(context.Background(),
+	_, err := s.pool.Exec(context.Background(),
 		"INSERT INTO conversation_messages (id,tenant_id,account_id,conversation_id,customer_name,role,content,knowledge_ids) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING",
 		id, tenantID, accountID, conversationID, customerName, role, content, knowledgeIDs,
 	)
+	return err
 }
 
 func (s *Store) LoadHistory( tenantID, conversationID string, limit int) ([]model.ConversationMessage, error) {
