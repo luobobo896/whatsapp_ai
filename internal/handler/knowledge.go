@@ -129,7 +129,7 @@ func handleListArticles(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusNotFound, gin.H{"error": model.ErrorDetail{Code: "NOT_FOUND", Message: "Knowledge base not found."}})
 			return
 		}
-		articles, err := st.ArticlesByKnowledgeBase(c.Param("id"))
+		articles, err := st.ArticlesByKnowledgeBase(c.Param("id"), session.ActiveTenantID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to load articles."}})
 			return
@@ -155,7 +155,7 @@ func handleCreateArticle(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Title is required."}})
 			return
 		}
-		article, err := st.CreateArticle(c.Param("id"), req.Title, req.Content, req.Category)
+		article, err := st.CreateArticle(c.Param("id"), req.Title, req.Content, req.Category, req.Attributes)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to create article."}})
 			return
@@ -171,12 +171,17 @@ func handleUpdateArticle(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "TENANT_REQUIRED", Message: "No tenant selected."}})
 			return
 		}
+		// Verify the parent knowledge base belongs to tenant
+		if _, err := st.KnowledgeBaseByID(c.Param("id"), session.ActiveTenantID); err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": model.ErrorDetail{Code: "NOT_FOUND", Message: "Knowledge base not found."}})
+			return
+		}
 		var req model.UpdateArticleRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Invalid request."}})
 			return
 		}
-		article, err := st.UpdateArticle(c.Param("articleId"), req.Title, req.Content, req.Category, req.Status)
+		article, err := st.UpdateArticle(c.Param("articleId"), req.Title, req.Content, req.Category, req.Attributes, req.Status)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to update article."}})
 			return
@@ -190,6 +195,11 @@ func handleDeleteArticle(st *store.Store) gin.HandlerFunc {
 		session := middleware.GetSession(c)
 		if session == nil || session.ActiveTenantID == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "TENANT_REQUIRED", Message: "No tenant selected."}})
+			return
+		}
+		// Verify the parent knowledge base belongs to tenant
+		if _, err := st.KnowledgeBaseByID(c.Param("id"), session.ActiveTenantID); err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": model.ErrorDetail{Code: "NOT_FOUND", Message: "Knowledge base not found."}})
 			return
 		}
 		if err := st.DeleteArticle(c.Param("articleId")); err != nil {

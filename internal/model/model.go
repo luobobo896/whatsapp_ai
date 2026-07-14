@@ -172,6 +172,7 @@ type KnowledgeArticle struct {
 	Title           string `json:"title"`
 	Content         string `json:"content"`
 	Category        string `json:"category"`
+	Attributes      string `json:"attributes"`
 	Status          string `json:"status"`
 	CreatedAt       string `json:"createdAt"`
 	UpdatedAt       string `json:"updatedAt"`
@@ -182,16 +183,18 @@ type KnowledgeArticlesResponse struct {
 }
 
 type CreateArticleRequest struct {
-	Title    string `json:"title"`
-	Content  string `json:"content"`
-	Category string `json:"category"`
+	Title      string `json:"title"`
+	Content    string `json:"content"`
+	Category   string `json:"category"`
+	Attributes string `json:"attributes"`
 }
 
 type UpdateArticleRequest struct {
-	Title    *string `json:"title,omitempty"`
-	Content  *string `json:"content,omitempty"`
-	Category *string `json:"category,omitempty"`
-	Status   *string `json:"status,omitempty"`
+	Title      *string `json:"title,omitempty"`
+	Content    *string `json:"content,omitempty"`
+	Category   *string `json:"category,omitempty"`
+	Attributes *string `json:"attributes,omitempty"`
+	Status     *string `json:"status,omitempty"`
 }
 
 // -- conversation --
@@ -294,6 +297,7 @@ type KnowledgeArticleRow struct {
 	Title           string
 	Content         string
 	Category        string
+	Attributes      string
 	Status          string
 	CreatedAt       string
 	UpdatedAt       string

@@ -53,7 +53,7 @@ async function removeArticle(article) {
   } catch { return; }
   try {
     await del(`/api/knowledge/bases/${props.base.id}/articles/${article.id}`, props.csrfToken);
-    showToast({ tone: "success", message: "文章已删除" });
+    showToast({ tone: "success", message: "知识条目已删除" });
     await loadArticles();
     emit("articles-changed");
   } catch (e) {
@@ -95,11 +95,11 @@ function onArticleSaved() {
     <el-card shadow="never">
       <template #header>
         <div style="display:flex;align-items:center;justify-content:space-between">
-          <span style="font-weight:600">文章列表 ({{ articles.length }})</span>
-          <el-button v-if="canManage" type="primary" :icon="Plus" @click="openCreate">新建文章</el-button>
+          <span style="font-weight:600">知识条目列表 ({{ articles.length }})</span>
+          <el-button v-if="canManage" type="primary" :icon="Plus" @click="openCreate">新建知识条目</el-button>
         </div>
       </template>
-      <el-empty v-if="!loading && !articles.length" description="暂无文章，点击上方按钮添加" />
+      <el-empty v-if="!loading && !articles.length" description="暂无知识条目，点击上方按钮添加" />
       <el-table v-else v-loading="loading" :data="articles" stripe>
         <el-table-column prop="title" label="标题" show-overflow-tooltip />
         <el-table-column prop="category" label="分类" width="140">

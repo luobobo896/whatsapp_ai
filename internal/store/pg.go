@@ -88,6 +88,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			id TEXT PRIMARY KEY, knowledge_base_id TEXT NOT NULL,
 			title TEXT NOT NULL, content TEXT NOT NULL DEFAULT '',
 			category TEXT NOT NULL DEFAULT '',
+			attributes TEXT NOT NULL DEFAULT '{}',
 			status TEXT NOT NULL DEFAULT 'active',
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -105,6 +106,8 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("ddl: %w\n%s", err, d)
 		}
 	}
+	// Migration: add attributes column if not exists
+	s.pool.Exec(context.Background(), `ALTER TABLE knowledge_articles ADD COLUMN IF NOT EXISTS attributes TEXT NOT NULL DEFAULT '{}'`)
 	return nil
 }
 
@@ -492,18 +495,21 @@ func (s *Store) DeleteKnowledgeBase( id, tenantID string) error {
 	return err
 }
 
-func (s *Store) ArticlesByKnowledgeBase( kbID string) ([]model.KnowledgeArticle, error) {
+func (s *Store) ArticlesByKnowledgeBase( kbID, tenantID string) ([]model.KnowledgeArticle, error) {
 	rows, err := s.pool.Query(context.Background(),
-		`SELECT id,knowledge_base_id,title,content,category,status,
-		        to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
-		        to_char(updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
-		 FROM knowledge_articles WHERE knowledge_base_id=$1 ORDER BY created_at`, kbID)
+		`SELECT a.id,a.knowledge_base_id,a.title,a.content,a.category,a.attributes,a.status,
+		        to_char(a.created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+		        to_char(a.updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+		 FROM knowledge_articles a
+		 JOIN knowledge_bases k ON a.knowledge_base_id = k.id
+		 WHERE a.knowledge_base_id=$1 AND k.tenant_id=$2
+		 ORDER BY a.created_at`, kbID, tenantID)
 	if err != nil { return nil, err }
 	defer rows.Close()
 	var list []model.KnowledgeArticle
 	for rows.Next() {
 		var a model.KnowledgeArticle
-		if err := rows.Scan(&a.ID, &a.KnowledgeBaseID, &a.Title, &a.Content, &a.Category, &a.Status, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.KnowledgeBaseID, &a.Title, &a.Content, &a.Category, &a.Attributes, &a.Status, &a.CreatedAt, &a.UpdatedAt); err != nil {
 			return nil, err
 		}
 		list = append(list, a)
@@ -512,34 +518,35 @@ func (s *Store) ArticlesByKnowledgeBase( kbID string) ([]model.KnowledgeArticle,
 	return list, rows.Err()
 }
 
-func (s *Store) CreateArticle( kbID, title, content, category string) (*model.KnowledgeArticleRow, error) {
+func (s *Store) CreateArticle( kbID, title, content, category, attributes string) (*model.KnowledgeArticleRow, error) {
 	a := &model.KnowledgeArticleRow{
 		ID: genID(), KnowledgeBaseID: kbID, Title: title,
-		Content: content, Category: category, Status: "active",
+		Content: content, Category: category, Attributes: attributes, Status: "active",
 	}
 	err := s.pool.QueryRow(context.Background(),
-		`INSERT INTO knowledge_articles (id,knowledge_base_id,title,content,category)
-		 VALUES ($1,$2,$3,$4,$5)
+		`INSERT INTO knowledge_articles (id,knowledge_base_id,title,content,category,attributes)
+		 VALUES ($1,$2,$3,$4,$5,$6)
 		 RETURNING to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
 		           to_char(updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`,
-		a.ID, a.KnowledgeBaseID, a.Title, a.Content, a.Category,
+		a.ID, a.KnowledgeBaseID, a.Title, a.Content, a.Category, a.Attributes,
 	).Scan(&a.CreatedAt, &a.UpdatedAt)
 	if err != nil { return nil, err }
 	return a, nil
 }
 
-func (s *Store) UpdateArticle( id string, title, content, category, status *string) (*model.KnowledgeArticleRow, error) {
+func (s *Store) UpdateArticle( id string, title, content, category, attributes, status *string) (*model.KnowledgeArticleRow, error) {
 	q := `UPDATE knowledge_articles SET updated_at=NOW(), `
 	args := []any{}
 	idx := 1
 	if title != nil { q += fmt.Sprintf(`title=$%d, `, idx); args = append(args, *title); idx++ }
 	if content != nil { q += fmt.Sprintf(`content=$%d, `, idx); args = append(args, *content); idx++ }
 	if category != nil { q += fmt.Sprintf(`category=$%d, `, idx); args = append(args, *category); idx++ }
+	if attributes != nil { q += fmt.Sprintf(`attributes=$%d, `, idx); args = append(args, *attributes); idx++ }
 	if status != nil { q += fmt.Sprintf(`status=$%d, `, idx); args = append(args, *status); idx++ }
-	q = q[:len(q)-2] + fmt.Sprintf(` WHERE id=$%d RETURNING id,knowledge_base_id,title,content,category,status,to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),to_char(updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`, idx)
+	q = q[:len(q)-2] + fmt.Sprintf(` WHERE id=$%d RETURNING id,knowledge_base_id,title,content,category,attributes,status,to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),to_char(updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`, idx)
 	args = append(args, id)
 	a := &model.KnowledgeArticleRow{}
-	err := s.pool.QueryRow(context.Background(), q, args...).Scan(&a.ID, &a.KnowledgeBaseID, &a.Title, &a.Content, &a.Category, &a.Status, &a.CreatedAt, &a.UpdatedAt)
+	err := s.pool.QueryRow(context.Background(), q, args...).Scan(&a.ID, &a.KnowledgeBaseID, &a.Title, &a.Content, &a.Category, &a.Attributes, &a.Status, &a.CreatedAt, &a.UpdatedAt)
 	if err != nil { return nil, err }
 	return a, nil
 }
