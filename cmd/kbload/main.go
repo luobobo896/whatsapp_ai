@@ -25,11 +25,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"whatsapp-ai-poc/internal/store"
@@ -107,8 +109,15 @@ func main() {
 	}
 
 	// 2. Ensure admin is owner.
-	if admin, err := st.UserByEmail(adminEmail); err == nil {
-		st.AddTenantMember(tenantID, admin.ID, "owner")
+	admin, err := st.UserByEmail(adminEmail)
+	if err == nil {
+		if err := st.AddTenantMember(tenantID, admin.ID, "owner"); err != nil {
+			fmt.Println("add tenant owner err:", err)
+			os.Exit(1)
+		}
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		fmt.Println("find admin err:", err)
+		os.Exit(1)
 	}
 
 	// 3. Load seed files.
@@ -119,7 +128,11 @@ func main() {
 	}
 	sort.Strings(files)
 
-	existing, _ := st.KnowledgeBasesByTenant(tenantID)
+	existing, err := st.KnowledgeBasesByTenant(tenantID)
+	if err != nil {
+		fmt.Println("list knowledge bases err:", err)
+		os.Exit(1)
+	}
 	byName := map[string]string{}
 	for _, k := range existing {
 		byName[k.Name] = k.ID
@@ -130,16 +143,16 @@ func main() {
 		raw, err := os.ReadFile(f)
 		if err != nil {
 			fmt.Printf("read %s err: %v\n", f, err)
-			continue
+			os.Exit(1)
 		}
 		var sf seedFile
 		if err := json.Unmarshal(raw, &sf); err != nil {
 			fmt.Printf("parse %s err: %v\n", f, err)
-			continue
+			os.Exit(1)
 		}
 		if sf.KB == "" || len(sf.Articles) == 0 {
 			fmt.Printf("skip %s: empty kb/articles\n", f)
-			continue
+			os.Exit(1)
 		}
 
 		kbID, ok := byName[sf.KB]
@@ -153,7 +166,10 @@ func main() {
 			byName[sf.KB] = kbID
 		} else {
 			// Replace: delete existing articles (chunks cleaned below).
-			pool.Exec(ctx, `DELETE FROM knowledge_articles WHERE knowledge_base_id=$1`, kbID)
+			if _, err := pool.Exec(ctx, `DELETE FROM knowledge_articles WHERE knowledge_base_id=$1`, kbID); err != nil {
+				fmt.Printf("delete articles for KB %q err: %v\n", sf.KB, err)
+				os.Exit(1)
+			}
 		}
 
 		count := 0
@@ -163,14 +179,17 @@ func main() {
 			}
 			attrs := "{}"
 			if len(a.Attributes) > 0 {
-				if b, err := json.Marshal(a.Attributes); err == nil {
-					attrs = string(b)
+				b, err := json.Marshal(a.Attributes)
+				if err != nil {
+					fmt.Printf("  attributes err (%s): %v\n", a.Title, err)
+					os.Exit(1)
 				}
+				attrs = string(b)
 			}
 			_, err := st.CreateArticle(kbID, a.Title, a.Content, a.Category, attrs)
 			if err != nil {
 				fmt.Printf("  article err (%s): %v\n", a.Title, err)
-				continue
+				os.Exit(1)
 			}
 			count++
 		}
@@ -179,7 +198,10 @@ func main() {
 	}
 
 	// 4. Remove chunks orphaned by the deletes above.
-	pool.Exec(ctx, `DELETE FROM knowledge_chunks c WHERE NOT EXISTS (SELECT 1 FROM knowledge_articles a WHERE a.id = c.article_id)`)
+	if _, err := pool.Exec(ctx, `DELETE FROM knowledge_chunks c WHERE NOT EXISTS (SELECT 1 FROM knowledge_articles a WHERE a.id = c.article_id)`); err != nil {
+		fmt.Println("delete orphaned chunks err:", err)
+		os.Exit(1)
+	}
 
 	fmt.Printf("\nDONE. tenant=%s total articles loaded=%d\n", tenantID, total)
 }
