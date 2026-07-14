@@ -1,0 +1,263 @@
+package model
+
+
+// -- request / response types --
+
+type LoginRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+type SelectTenantRequest struct {
+	TenantID string `json:"tenantId"`
+}
+
+type CreateTenantRequest struct {
+	Name string `json:"name"`
+}
+
+type CreateAccountRequest struct {
+	Name       string `json:"name"`
+	DailyLimit int    `json:"dailyLimit"`
+}
+
+type CreateKnowledgeRequest struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+type InviteMemberRequest struct {
+	Email string `json:"email"`
+	Role  string `json:"role"`
+}
+
+type AcceptInvitationRequest struct {
+	Email       string `json:"email"`
+	DisplayName string `json:"displayName"`
+	Password    string `json:"password"`
+}
+
+type UpdateMemberRequest struct {
+	Role   string `json:"role,omitempty"`
+	Status string `json:"status,omitempty"`
+}
+
+type UpdateTenantStatusRequest struct {
+	Status string `json:"status"`
+	Reason string `json:"reason"`
+}
+
+type ErrorDetail struct {
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+	RequestID string `json:"requestId,omitempty"`
+}
+
+// -- session --
+
+type Session struct {
+	CSRFToken      string `json:"csrfToken"`
+	ActiveTenantID string `json:"activeTenantId"`
+	User           User   `json:"user"`
+}
+
+func (s Session) IsPlatformAdmin() bool {
+	return s.User.PlatformRole == "platform_admin"
+}
+
+// -- user --
+
+type User struct {
+	ID           string `json:"id"`
+	Email        string `json:"email"`
+	DisplayName  string `json:"displayName"`
+	PlatformRole string `json:"platformRole,omitempty"`
+}
+
+// -- tenant (with membership info) --
+
+type TenantWithMembership struct {
+	ID               string   `json:"id"`
+	Name             string   `json:"name"`
+	Status           string   `json:"status"`
+	Role             string   `json:"role,omitempty"`
+	MembershipStatus string   `json:"membershipStatus,omitempty"`
+	Permissions      []string `json:"permissions,omitempty"`
+}
+
+func PermissionsForRole(role string) []string {
+	switch role {
+	case "owner", "admin":
+		return []string{"accounts:manage", "knowledge:manage", "members:manage"}
+	case "agent":
+		return []string{"accounts:manage", "knowledge:manage"}
+	default:
+		return nil
+	}
+}
+
+// -- tenant list response --
+
+type TenantsResponse struct {
+	PlatformRole string                  `json:"platformRole"`
+	Tenants      []TenantWithMembership  `json:"tenants"`
+}
+
+// -- member --
+
+type Member struct {
+	UserID      string `json:"userId"`
+	Email       string `json:"email"`
+	DisplayName string `json:"displayName"`
+	Role        string `json:"role"`
+	Status      string `json:"status"`
+	CreatedAt   string `json:"createdAt"`
+}
+
+type MembersResponse struct {
+	Members []Member `json:"members"`
+}
+
+// -- invitation --
+
+type Invitation struct {
+	Token string `json:"token"`
+	Email string `json:"email"`
+}
+
+type InviteResponse struct {
+	Invitation Invitation `json:"invitation"`
+}
+
+// -- account --
+
+type Account struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	AccountKey string `json:"accountKey"`
+	Status     string `json:"status"`
+	DailyLimit int    `json:"dailyLimit"`
+	CreatedAt  string `json:"createdAt"`
+}
+
+type AccountsResponse struct {
+	Accounts []Account `json:"accounts"`
+}
+
+// -- knowledge base --
+
+type KnowledgeBase struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Status      string `json:"status"`
+	CreatedAt   string `json:"createdAt"`
+}
+
+type KnowledgeBasesResponse struct {
+	Bases []KnowledgeBase `json:"bases"`
+}
+
+// -- conversation --
+
+type Conversation struct {
+	ID            string `json:"id"`
+	AccountID     string `json:"accountId"`
+	Customer      string `json:"customer"`
+	LastMessage   string `json:"lastMessage"`
+	Status        string `json:"status"`
+	LastMessageAt string `json:"lastMessageAt"`
+}
+
+type ConversationsResponse struct {
+	Conversations []Conversation `json:"conversations"`
+}
+
+// -- create tenant response --
+
+type CreateTenantResponse struct {
+	Tenant      TenantWithMembership `json:"tenant"`
+	Credentials struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	} `json:"credentials"`
+}
+
+// -- accept invitation response --
+
+type AcceptInvitationResponse struct {
+	TenantID  string `json:"tenantId"`
+	CSRFToken string `json:"csrfToken"`
+}
+
+// -- internal DB row types (timestamps are strings because SQLite stores TEXT) --
+
+type SessionRow struct {
+	ID             string
+	UserID         string
+	CSRFToken      string
+	ActiveTenantID string
+	ExpiresAt      string
+}
+
+type UserRow struct {
+	ID           string
+	Email        string
+	DisplayName  string
+	PasswordHash string
+	PlatformRole string
+	CreatedAt    string
+}
+
+type TenantRow struct {
+	ID        string
+	Name      string
+	Status    string
+	CreatedAt string
+}
+
+type TenantMemberRow struct {
+	TenantID string
+	UserID   string
+	Role     string
+	Status   string
+}
+
+type InvitationRow struct {
+	ID        string
+	Token     string
+	TenantID  string
+	Email     string
+	Role      string
+	ExpiresAt string
+	CreatedAt string
+}
+
+type AccountRow struct {
+	ID         string
+	TenantID   string
+	Name       string
+	AccountKey string
+	Status     string
+	DailyLimit int
+	CreatedAt  string
+}
+
+type KnowledgeRow struct {
+	ID          string
+	TenantID    string
+	Name        string
+	Description string
+	Status      string
+	CreatedAt   string
+}
+
+type ConversationRow struct {
+	ID            string
+	TenantID      string
+	AccountID     string
+	Customer      string
+	LastMessage   string
+	Status        string
+	LastMessageAt string
+}
