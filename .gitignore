@@ -24,3 +24,6 @@ web/dist/*
 # Runtime artifacts
 logs/
 data/
+
+# Build output
+server
