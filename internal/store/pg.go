@@ -4,13 +4,23 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"math"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"whatsapp-ai-poc/internal/model"
 )
+
+// ChunkInfo is used by GetChunksWithoutEmbeddings
+type ChunkInfo struct {
+	ID      string
+	Content string
+}
 
 type Store struct{ pool *pgxpool.Pool }
 
@@ -93,6 +103,21 @@ func (s *Store) migrate(ctx context.Context) error {
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
+		`CREATE TABLE IF NOT EXISTS knowledge_chunks (
+				id TEXT PRIMARY KEY, article_id TEXT NOT NULL,
+				content TEXT NOT NULL, chunk_index INTEGER NOT NULL DEFAULT 0,
+				embedding TEXT,
+				created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+			)`,
+		`CREATE INDEX IF NOT EXISTS idx_chunks_article ON knowledge_chunks(article_id)`,
+		`CREATE TABLE IF NOT EXISTS conversation_messages (
+			id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL,
+			conversation_id TEXT NOT NULL, customer_name TEXT NOT NULL DEFAULT '',
+			role TEXT NOT NULL, content TEXT NOT NULL,
+			knowledge_ids TEXT NOT NULL DEFAULT '[]',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_conv_msg_lookup ON conversation_messages(tenant_id, conversation_id, created_at)`,
 		`CREATE TABLE IF NOT EXISTS conversations (
 			id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL,
 			account_id TEXT NOT NULL, customer TEXT NOT NULL,
@@ -106,8 +131,14 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("ddl: %w\n%s", err, d)
 		}
 	}
-	// Migration: add attributes column if not exists
+	// Migrations
 	s.pool.Exec(context.Background(), `ALTER TABLE knowledge_articles ADD COLUMN IF NOT EXISTS attributes TEXT NOT NULL DEFAULT '{}'`)
+	s.pool.Exec(context.Background(), `ALTER TABLE knowledge_articles ADD COLUMN IF NOT EXISTS search_vector tsvector`)
+	s.pool.Exec(context.Background(), `CREATE INDEX IF NOT EXISTS idx_articles_search ON knowledge_articles USING GIN (search_vector)`)
+	s.pool.Exec(context.Background(), `CREATE OR REPLACE FUNCTION articles_search_update() RETURNS trigger AS $$ BEGIN NEW.search_vector := setweight(to_tsvector('simple', COALESCE(NEW.title, '')), 'A') || setweight(to_tsvector('simple', COALESCE(NEW.content, '')), 'B') || setweight(to_tsvector('simple', COALESCE(NEW.category, '')), 'C') || setweight(to_tsvector('simple', COALESCE(NEW.attributes, '')), 'D'); RETURN NEW; END; $$ LANGUAGE plpgsql`)
+	s.pool.Exec(context.Background(), `DROP TRIGGER IF EXISTS trg_articles_search ON knowledge_articles`)
+	s.pool.Exec(context.Background(), `CREATE TRIGGER trg_articles_search BEFORE INSERT OR UPDATE ON knowledge_articles FOR EACH ROW EXECUTE FUNCTION articles_search_update()`)
+	s.pool.Exec(context.Background(), `UPDATE knowledge_articles SET search_vector = setweight(to_tsvector('simple', COALESCE(title, '')), 'A') || setweight(to_tsvector('simple', COALESCE(content, '')), 'B') || setweight(to_tsvector('simple', COALESCE(category, '')), 'C') || setweight(to_tsvector('simple', COALESCE(attributes, '')), 'D') WHERE search_vector IS NULL`)
 	return nil
 }
 
@@ -120,7 +151,7 @@ func (s *Store) CreateUser( email, displayName, passwordHash, platformRole strin
 	}
 	err := s.pool.QueryRow(context.Background(),
 		`INSERT INTO users (id,email,display_name,password_hash,platform_role) VALUES ($1,$2,$3,$4,$5)
-		 RETURNING to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`,
+		 RETURNING to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')`,
 		u.ID, u.Email, u.DisplayName, u.PasswordHash, u.PlatformRole,
 	).Scan(&u.CreatedAt)
 	if err != nil {
@@ -133,7 +164,7 @@ func (s *Store) UserByEmail( email string) (*model.UserRow, error) {
 	u := &model.UserRow{}
 	err := s.pool.QueryRow(context.Background(),
 		`SELECT id,email,display_name,password_hash,platform_role,
-		        to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+		        to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')
 		 FROM users WHERE email=$1`, email,
 	).Scan(&u.ID, &u.Email, &u.DisplayName, &u.PasswordHash, &u.PlatformRole, &u.CreatedAt)
 	if err != nil {
@@ -146,7 +177,7 @@ func (s *Store) UserByID( id string) (*model.UserRow, error) {
 	u := &model.UserRow{}
 	err := s.pool.QueryRow(context.Background(),
 		`SELECT id,email,display_name,password_hash,platform_role,
-		        to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+		        to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')
 		 FROM users WHERE id=$1`, id,
 	).Scan(&u.ID, &u.Email, &u.DisplayName, &u.PasswordHash, &u.PlatformRole, &u.CreatedAt)
 	if err != nil {
@@ -160,7 +191,7 @@ func (s *Store) UserByID( id string) (*model.UserRow, error) {
 func (s *Store) CreateSession( userID string) (*model.SessionRow, error) {
 	sess := &model.SessionRow{
 		ID: genToken(), UserID: userID, CSRFToken: genToken(),
-		ExpiresAt: time.Now().Add(24 * time.Hour).Format(time.RFC3339),
+		ExpiresAt: time.Now().Add(24 * time.Hour).Format("2006-01-02 15:04:05"),
 	}
 	_, err := s.pool.Exec(context.Background(),
 		`INSERT INTO sessions (id,user_id,csrf_token,active_tenant_id,expires_at)
@@ -178,7 +209,7 @@ func (s *Store) SessionByID( id string) (*model.SessionRow, error) {
 	var activeTenant *string
 	err := s.pool.QueryRow(context.Background(),
 		`SELECT id,user_id,csrf_token,active_tenant_id,
-		        to_char(expires_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+		        to_char(expires_at, 'YYYY-MM-DD HH24:MI:SS')
 		 FROM sessions WHERE id=$1`, id,
 	).Scan(&sess.ID, &sess.UserID, &sess.CSRFToken, &activeTenant, &sess.ExpiresAt)
 	if err != nil {
@@ -187,7 +218,7 @@ func (s *Store) SessionByID( id string) (*model.SessionRow, error) {
 	if activeTenant != nil {
 		sess.ActiveTenantID = *activeTenant
 	}
-	if expires, err := time.Parse(time.RFC3339, sess.ExpiresAt); err != nil || time.Now().After(expires) {
+	if expires, err := time.Parse("2006-01-02 15:04:05", sess.ExpiresAt); err != nil || time.Now().After(expires) {
 		s.pool.Exec(context.Background(), `DELETE FROM sessions WHERE id=$1`, id)
 		return nil, fmt.Errorf("session expired")
 	}
@@ -209,7 +240,7 @@ func (s *Store) DeleteSession( id string) error {
 func (s *Store) CreateTenant( name string) (*model.TenantRow, error) {
 	t := &model.TenantRow{ID: genID(), Name: name, Status: "active"}
 	err := s.pool.QueryRow(context.Background(),
-		`INSERT INTO tenants (id,name) VALUES ($1,$2) RETURNING to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`,
+		`INSERT INTO tenants (id,name) VALUES ($1,$2) RETURNING to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')`,
 		t.ID, t.Name,
 	).Scan(&t.CreatedAt)
 	if err != nil {
@@ -221,7 +252,7 @@ func (s *Store) CreateTenant( name string) (*model.TenantRow, error) {
 func (s *Store) TenantByID( id string) (*model.TenantRow, error) {
 	t := &model.TenantRow{}
 	err := s.pool.QueryRow(context.Background(),
-		`SELECT id,name,status,to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') FROM tenants WHERE id=$1`, id,
+		`SELECT id,name,status,to_char(created_at, 'YYYY-MM-DD HH24:MI:SS') FROM tenants WHERE id=$1`, id,
 	).Scan(&t.ID, &t.Name, &t.Status, &t.CreatedAt)
 	if err != nil {
 		return nil, err
@@ -320,7 +351,7 @@ func (s *Store) UpdateMember( tenantID, userID, role, status string) error {
 func (s *Store) TenantMembers( tenantID string) ([]model.Member, error) {
 	rows, err := s.pool.Query(context.Background(), `
 		SELECT u.id, u.email, u.display_name, tm.role, tm.status,
-		       to_char(u.created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+		       to_char(u.created_at, 'YYYY-MM-DD HH24:MI:SS')
 		FROM tenant_members tm
 		JOIN users u ON u.id = tm.user_id
 		WHERE tm.tenant_id = $1`, tenantID)
@@ -345,11 +376,11 @@ func (s *Store) CreateInvitation( tenantID, email, role string) (*model.Invitati
 	inv := &model.InvitationRow{
 		ID: genID(), Token: genToken(), TenantID: tenantID,
 		Email: email, Role: role,
-		ExpiresAt: time.Now().Add(7 * 24 * time.Hour).Format(time.RFC3339),
+		ExpiresAt: time.Now().Add(7 * 24 * time.Hour).Format("2006-01-02 15:04:05"),
 	}
 	err := s.pool.QueryRow(context.Background(),
 		`INSERT INTO invitations (id,token,tenant_id,email,role,expires_at) VALUES ($1,$2,$3,$4,$5,$6)
-		 RETURNING to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`,
+		 RETURNING to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')`,
 		inv.ID, inv.Token, inv.TenantID, inv.Email, inv.Role, inv.ExpiresAt,
 	).Scan(&inv.CreatedAt)
 	if err != nil {
@@ -362,14 +393,14 @@ func (s *Store) InvitationByToken( token string) (*model.InvitationRow, error) {
 	inv := &model.InvitationRow{}
 	err := s.pool.QueryRow(context.Background(),
 		`SELECT id,token,tenant_id,email,role,
-		        to_char(expires_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
-		        to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+		        to_char(expires_at, 'YYYY-MM-DD HH24:MI:SS'),
+		        to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')
 		 FROM invitations WHERE token=$1`, token,
 	).Scan(&inv.ID, &inv.Token, &inv.TenantID, &inv.Email, &inv.Role, &inv.ExpiresAt, &inv.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
-	if expires, err := time.Parse(time.RFC3339, inv.ExpiresAt); err != nil || time.Now().After(expires) {
+	if expires, err := time.Parse("2006-01-02 15:04:05", inv.ExpiresAt); err != nil || time.Now().After(expires) {
 		s.pool.Exec(context.Background(), `DELETE FROM invitations WHERE id=$1`, inv.ID)
 		return nil, fmt.Errorf("invitation expired")
 	}
@@ -386,7 +417,7 @@ func (s *Store) DeleteInvitation( id string) error {
 func (s *Store) AccountsByTenant( tenantID string) ([]model.Account, error) {
 	rows, err := s.pool.Query(context.Background(),
 		`SELECT id,name,account_key,status,daily_limit,
-		        to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+		        to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')
 		 FROM accounts WHERE tenant_id=$1 ORDER BY created_at`, tenantID)
 	if err != nil {
 		return nil, err
@@ -411,7 +442,7 @@ func (s *Store) CreateAccount( tenantID, name string, dailyLimit int) (*model.Ac
 	err := s.pool.QueryRow(context.Background(),
 		`INSERT INTO accounts (id,tenant_id,name,account_key,status,daily_limit)
 		 VALUES ($1,$2,$3,$4,$5,$6)
-		 RETURNING to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`,
+		 RETURNING to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')`,
 		a.ID, a.TenantID, a.Name, a.AccountKey, a.Status, a.DailyLimit,
 	).Scan(&a.CreatedAt)
 	if err != nil {
@@ -425,7 +456,7 @@ func (s *Store) CreateAccount( tenantID, name string, dailyLimit int) (*model.Ac
 func (s *Store) KnowledgeBasesByTenant( tenantID string) ([]model.KnowledgeBase, error) {
 	rows, err := s.pool.Query(context.Background(),
 		`SELECT id,name,description,status,
-		        to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+		        to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')
 		 FROM knowledge_bases WHERE tenant_id=$1 ORDER BY created_at`, tenantID)
 	if err != nil {
 		return nil, err
@@ -450,7 +481,7 @@ func (s *Store) CreateKnowledgeBase( tenantID, name, description string) (*model
 	err := s.pool.QueryRow(context.Background(),
 		`INSERT INTO knowledge_bases (id,tenant_id,name,description,status)
 		 VALUES ($1,$2,$3,$4,$5)
-		 RETURNING to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`,
+		 RETURNING to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')`,
 		k.ID, k.TenantID, k.Name, k.Description, k.Status,
 	).Scan(&k.CreatedAt)
 	if err != nil {
@@ -461,12 +492,225 @@ func (s *Store) CreateKnowledgeBase( tenantID, name, description string) (*model
 
 // ---- conversations ----
 
+func (s *Store) SearchKnowledge( tenantID, query string, embedding []float32, limit int) ([]model.SearchResultItem, error) {
+	if limit <= 0 { limit = 5 }
+		// Vector search via Go cosine similarity if embedding provided
+		if len(embedding) > 0 {
+			rows, err := s.pool.Query(context.Background(),
+				"SELECT a.id, a.title, a.content, a.category, a.attributes, k.name AS kb_name, c.id, c.embedding FROM knowledge_chunks c JOIN knowledge_articles a ON c.article_id = a.id JOIN knowledge_bases k ON a.knowledge_base_id = k.id WHERE k.tenant_id=$1 AND a.status='active' AND k.status='active' AND c.embedding IS NOT NULL", tenantID)
+			if err == nil {
+				defer rows.Close()
+				type row struct {
+					artID, title, content, category, attrs, kbName, chunkID, emb string
+				}
+				var chunks []row
+				for rows.Next() {
+					var r row
+					if err := rows.Scan(&r.artID, &r.title, &r.content, &r.category, &r.attrs, &r.kbName, &r.chunkID, &r.emb); err != nil {
+						continue
+					}
+					chunks = append(chunks, r)
+				}
+				rows.Close()
+				type scored struct {
+					item  model.SearchResultItem
+					score float64
+				}
+				var results []scored
+				for _, ck := range chunks {
+					var embVec []float64
+					if json.Unmarshal([]byte(ck.emb), &embVec) == nil && len(embVec) > 0 {
+						queryVec := make([]float64, len(embedding))
+						for i_, v := range embedding { queryVec[i_] = float64(v) }
+						sim := cosineSimilarity(queryVec, embVec)
+						results = append(results, scored{
+							item:  model.SearchResultItem{ID: ck.artID, Title: ck.title, Content: ck.content, Category: ck.category, Attributes: ck.attrs, KnowledgeBaseName: ck.kbName, Score: sim},
+							score: sim,
+						})
+					}
+				}
+				sort.Slice(results, func(i_, j_ int) bool { return results[i_].score > results[j_].score })
+				seen := map[string]bool{}
+				var list []model.SearchResultItem
+				for _, s := range results {
+					if !seen[s.item.ID] {
+						seen[s.item.ID] = true
+						list = append(list, s.item)
+						if len(list) >= limit { break }
+					}
+				}
+				if len(list) > 0 { return list, nil }
+			}
+		}
+	// ILIKE fallback for Chinese text
+	words := splitQuery(query)
+	if len(words) == 0 { return []model.SearchResultItem{}, nil }
+	scoreParts := make([]string, len(words))
+	likeParts := make([]string, len(words))
+	args := []any{tenantID, limit}
+	argIdx := 3
+	for i, w := range words {
+		p := fmt.Sprintf("$%d", argIdx)
+		argIdx++
+		scoreParts[i] = fmt.Sprintf("(CASE WHEN a.title ILIKE '%%%%' || %s || '%%%%' THEN 3 WHEN a.content ILIKE '%%%%' || %s || '%%%%' THEN 2 WHEN a.category ILIKE '%%%%' || %s || '%%%%' THEN 2 WHEN a.attributes ILIKE '%%%%' || %s || '%%%%' THEN 1 ELSE 0 END)", p, p, p, p)
+		likeParts[i] = fmt.Sprintf("(a.title ILIKE '%%%%' || %s || '%%%%' OR a.content ILIKE '%%%%' || %s || '%%%%' OR a.category ILIKE '%%%%' || %s || '%%%%' OR a.attributes ILIKE '%%%%' || %s || '%%%%')", p, p, p, p)
+		args = append(args, w)
+	}
+	sql := fmt.Sprintf("SELECT a.id, a.title, a.content, a.category, a.attributes, k.name AS kb_name, (%s) AS score FROM knowledge_articles a JOIN knowledge_bases k ON a.knowledge_base_id = k.id WHERE k.tenant_id=$1 AND a.status='active' AND k.status='active' AND (%s) ORDER BY score DESC LIMIT $2", strings.Join(scoreParts, " + "), strings.Join(likeParts, " AND "))
+	rows, err := s.pool.Query(context.Background(), sql, args...)
+	if err != nil { return nil, err }
+	defer rows.Close()
+	var list []model.SearchResultItem
+	for rows.Next() {
+		var item model.SearchResultItem
+		if err := rows.Scan(&item.ID, &item.Title, &item.Content, &item.Category, &item.Attributes, &item.KnowledgeBaseName, &item.Score); err != nil {
+			return nil, err
+		}
+		list = append(list, item)
+	}
+	if list == nil { list = []model.SearchResultItem{} }
+	return list, rows.Err()
+}
+
+// ChunkArticle splits article content into chunks and stores them.
+func (s *Store) ChunkArticle( articleID, content string) error {
+	s.pool.Exec(context.Background(), "DELETE FROM knowledge_chunks WHERE article_id=$1", articleID)
+	chunks := splitContent(content, 500)
+	for i, c := range chunks {
+		id := genID()
+		s.pool.Exec(context.Background(),
+			"INSERT INTO knowledge_chunks (id,article_id,content,chunk_index) VALUES ($1,$2,$3,$4)",
+			id, articleID, c, i)
+	}
+	return nil
+}
+
+// UpdateChunkEmbedding sets the embedding vector for a chunk.
+func (s *Store) UpdateChunkEmbedding( chunkID string, embedding []float32) error {
+	b, _ := json.Marshal(embedding)
+	_, err := s.pool.Exec(context.Background(),
+		"UPDATE knowledge_chunks SET embedding=$1 WHERE id=$2", string(b), chunkID)
+	return err
+}
+
+// GetChunksWithoutEmbeddings returns chunks that need embedding.
+func (s *Store) GetChunksWithoutEmbeddings( tenantID string, limit int) ([]ChunkInfo, error) {
+	rows, err := s.pool.Query(context.Background(),
+		"SELECT c.id, c.content FROM knowledge_chunks c JOIN knowledge_articles a ON c.article_id = a.id JOIN knowledge_bases k ON a.knowledge_base_id = k.id WHERE k.tenant_id=$1 AND c.embedding IS NULL LIMIT $2",
+		tenantID, limit)
+	if err != nil { return nil, err }
+	defer rows.Close()
+	var list []ChunkInfo
+	for rows.Next() {
+		var item ChunkInfo
+		if err := rows.Scan(&item.ID, &item.Content); err != nil { return nil, err }
+		list = append(list, item)
+	}
+	return list, rows.Err()
+}
+
+func splitContent(text string, maxLen int) []string {
+	if len([]rune(text)) <= maxLen {
+		return []string{text}
+	}
+	var chunks []string
+	runes := []rune(text)
+	for i := 0; i < len(runes); i += maxLen {
+		end := i + maxLen
+		if end > len(runes) { end = len(runes) }
+		chunks = append(chunks, string(runes[i:end]))
+	}
+	return chunks
+}
+
+
+func splitQuery(q string) []string {
+	sep := func(r rune) bool {
+		return r == ' ' || r == '、' || r == '。' || r == '，' || r == '？' || r == '！' || r == '；' || r == '：' ||
+			r == ',' || r == '.' || r == '?' || r == '!'
+	}
+	parts := strings.FieldsFunc(q, sep)
+	seen := map[string]bool{}
+	var result []string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if len(p) == 0 { continue }
+		if !seen[p] { result = append(result, p); seen[p] = true }
+		// For Chinese text (>2 chars), add bigrams and unigrams for fuzzy matching
+		runes := []rune(p)
+		if len(runes) > 2 {
+			for i := 0; i < len(runes)-1; i++ {
+				bigram := string(runes[i : i+2])
+				if !seen[bigram] { result = append(result, bigram); seen[bigram] = true }
+			}
+			for _, r := range runes {
+				ch := string(r)
+				if !seen[ch] { result = append(result, ch); seen[ch] = true }
+			}
+		}
+	}
+	return result
+}
+
+func (s *Store) SaveMessage( tenantID, conversationID, customerName, role, content, knowledgeIDs string) (*model.ConversationMessage, error) {
+	m := &model.ConversationMessage{
+		ID: genID(), ConversationID: conversationID, CustomerName: customerName,
+		Role: role, Content: content, KnowledgeIDs: knowledgeIDs,
+	}
+	err := s.pool.QueryRow(context.Background(),
+		"INSERT INTO conversation_messages (id,tenant_id,conversation_id,customer_name,role,content,knowledge_ids) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')",
+		m.ID, tenantID, m.ConversationID, m.CustomerName, m.Role, m.Content, m.KnowledgeIDs,
+	).Scan(&m.CreatedAt)
+	if err != nil { return nil, err }
+	return m, nil
+}
+
+func (s *Store) LoadHistory( tenantID, conversationID string, limit int) ([]model.ConversationMessage, error) {
+	if limit <= 0 { limit = 20 }
+	rows, err := s.pool.Query(context.Background(),
+		"SELECT id,conversation_id,customer_name,role,content,knowledge_ids,to_char(created_at, 'YYYY-MM-DD HH24:MI:SS') FROM conversation_messages WHERE tenant_id=$1 AND conversation_id=$2 ORDER BY created_at DESC LIMIT $3",
+		tenantID, conversationID, limit)
+	if err != nil { return nil, err }
+	defer rows.Close()
+	var list []model.ConversationMessage
+	for rows.Next() {
+		var m model.ConversationMessage
+		if err := rows.Scan(&m.ID, &m.ConversationID, &m.CustomerName, &m.Role, &m.Content, &m.KnowledgeIDs, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, m)
+	}
+	if list == nil { list = []model.ConversationMessage{} }
+	return list, rows.Err()
+}
+
+func (s *Store) ListConversationSummaries( tenantID string) ([]model.ConversationSummary, error) {
+	rows, err := s.pool.Query(context.Background(),
+		"SELECT conversation_id, customer_name, (SELECT content FROM conversation_messages cm2 WHERE cm2.tenant_id=$1 AND cm2.conversation_id=cm.conversation_id ORDER BY created_at DESC LIMIT 1) AS last_message, (SELECT to_char(created_at, 'YYYY-MM-DD HH24:MI:SS') FROM conversation_messages cm3 WHERE cm3.tenant_id=$1 AND cm3.conversation_id=cm.conversation_id ORDER BY created_at DESC LIMIT 1) AS last_message_at, COUNT(*) AS message_count FROM conversation_messages cm WHERE tenant_id=$1 GROUP BY conversation_id, customer_name ORDER BY last_message_at DESC", tenantID)
+	if err != nil { return nil, err }
+	defer rows.Close()
+	var list []model.ConversationSummary
+	for rows.Next() {
+		var s model.ConversationSummary
+		var lastAt *string
+		if err := rows.Scan(&s.ConversationID, &s.CustomerName, &s.LastMessage, &lastAt, &s.MessageCount); err != nil {
+			return nil, err
+		}
+		if lastAt != nil { s.LastMessageAt = *lastAt }
+		list = append(list, s)
+	}
+	if list == nil { list = []model.ConversationSummary{} }
+	return list, rows.Err()
+}
+
+
+
 
 func (s *Store) KnowledgeBaseByID( id, tenantID string) (*model.KnowledgeRow, error) {
 	k := &model.KnowledgeRow{}
 	err := s.pool.QueryRow(context.Background(),
 		`SELECT id,tenant_id,name,description,status,
-		        to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+		        to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')
 		 FROM knowledge_bases WHERE id=$1 AND tenant_id=$2`, id, tenantID,
 	).Scan(&k.ID, &k.TenantID, &k.Name, &k.Description, &k.Status, &k.CreatedAt)
 	if err != nil {
@@ -482,7 +726,7 @@ func (s *Store) UpdateKnowledgeBase( id, tenantID string, name, description, sta
 	if name != nil { q += fmt.Sprintf(`name=$%d, `, idx); args = append(args, *name); idx++ }
 	if description != nil { q += fmt.Sprintf(`description=$%d, `, idx); args = append(args, *description); idx++ }
 	if status != nil { q += fmt.Sprintf(`status=$%d, `, idx); args = append(args, *status); idx++ }
-	q = q[:len(q)-2] + fmt.Sprintf(` WHERE id=$%d AND tenant_id=$%d RETURNING id,tenant_id,name,description,status,to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`, idx, idx+1)
+	q = q[:len(q)-2] + fmt.Sprintf(` WHERE id=$%d AND tenant_id=$%d RETURNING id,tenant_id,name,description,status,to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')`, idx, idx+1)
 	args = append(args, id, tenantID)
 	k := &model.KnowledgeRow{}
 	err := s.pool.QueryRow(context.Background(), q, args...).Scan(&k.ID, &k.TenantID, &k.Name, &k.Description, &k.Status, &k.CreatedAt)
@@ -498,8 +742,8 @@ func (s *Store) DeleteKnowledgeBase( id, tenantID string) error {
 func (s *Store) ArticlesByKnowledgeBase( kbID, tenantID string) ([]model.KnowledgeArticle, error) {
 	rows, err := s.pool.Query(context.Background(),
 		`SELECT a.id,a.knowledge_base_id,a.title,a.content,a.category,a.attributes,a.status,
-		        to_char(a.created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
-		        to_char(a.updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+		        to_char(a.created_at, 'YYYY-MM-DD HH24:MI:SS'),
+		        to_char(a.updated_at, 'YYYY-MM-DD HH24:MI:SS')
 		 FROM knowledge_articles a
 		 JOIN knowledge_bases k ON a.knowledge_base_id = k.id
 		 WHERE a.knowledge_base_id=$1 AND k.tenant_id=$2
@@ -526,8 +770,8 @@ func (s *Store) CreateArticle( kbID, title, content, category, attributes string
 	err := s.pool.QueryRow(context.Background(),
 		`INSERT INTO knowledge_articles (id,knowledge_base_id,title,content,category,attributes)
 		 VALUES ($1,$2,$3,$4,$5,$6)
-		 RETURNING to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
-		           to_char(updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`,
+		 RETURNING to_char(created_at, 'YYYY-MM-DD HH24:MI:SS'),
+		           to_char(updated_at, 'YYYY-MM-DD HH24:MI:SS')`,
 		a.ID, a.KnowledgeBaseID, a.Title, a.Content, a.Category, a.Attributes,
 	).Scan(&a.CreatedAt, &a.UpdatedAt)
 	if err != nil { return nil, err }
@@ -543,7 +787,7 @@ func (s *Store) UpdateArticle( id string, title, content, category, attributes, 
 	if category != nil { q += fmt.Sprintf(`category=$%d, `, idx); args = append(args, *category); idx++ }
 	if attributes != nil { q += fmt.Sprintf(`attributes=$%d, `, idx); args = append(args, *attributes); idx++ }
 	if status != nil { q += fmt.Sprintf(`status=$%d, `, idx); args = append(args, *status); idx++ }
-	q = q[:len(q)-2] + fmt.Sprintf(` WHERE id=$%d RETURNING id,knowledge_base_id,title,content,category,attributes,status,to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),to_char(updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`, idx)
+	q = q[:len(q)-2] + fmt.Sprintf(` WHERE id=$%d RETURNING id,knowledge_base_id,title,content,category,attributes,status,to_char(created_at, 'YYYY-MM-DD HH24:MI:SS'),to_char(updated_at, 'YYYY-MM-DD HH24:MI:SS')`, idx)
 	args = append(args, id)
 	a := &model.KnowledgeArticleRow{}
 	err := s.pool.QueryRow(context.Background(), q, args...).Scan(&a.ID, &a.KnowledgeBaseID, &a.Title, &a.Content, &a.Category, &a.Attributes, &a.Status, &a.CreatedAt, &a.UpdatedAt)
@@ -560,7 +804,7 @@ func (s *Store) DeleteArticle( id string) error {
 func (s *Store) ConversationsByTenant( tenantID string) ([]model.Conversation, error) {
 	rows, err := s.pool.Query(context.Background(),
 		`SELECT id,account_id,customer,last_message,status,
-		        to_char(last_message_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+		        to_char(last_message_at, 'YYYY-MM-DD HH24:MI:SS')
 		 FROM conversations WHERE tenant_id=$1 ORDER BY last_message_at DESC`, tenantID)
 	if err != nil {
 		return nil, err
@@ -575,4 +819,16 @@ func (s *Store) ConversationsByTenant( tenantID string) ([]model.Conversation, e
 		list = append(list, c)
 	}
 	return list, rows.Err()
+}
+
+func cosineSimilarity(a, b []float64) float64 {
+	if len(a) != len(b) || len(a) == 0 { return 0 }
+	var dot, normA, normB float64
+	for i := range a {
+		dot += a[i] * b[i]
+		normA += a[i] * a[i]
+		normB += b[i] * b[i]
+	}
+	if normA == 0 || normB == 0 { return 0 }
+	return dot / (math.Sqrt(normA) * math.Sqrt(normB))
 }

@@ -72,6 +72,7 @@ func run() error {
 		handler.RegisterTenants(api.Group("/tenants"), st)
 		handler.RegisterAccounts(api.Group("/accounts"), st)
 		handler.RegisterKnowledge(api.Group("/knowledge"), st)
+		handler.RegisterKnowledgeSearch(api.Group("/knowledge"), st)
 		handler.RegisterConversations(api.Group("/conversations"), st)
 		handler.RegisterMembers(api.Group("/members"), st)
 

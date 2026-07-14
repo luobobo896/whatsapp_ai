@@ -197,7 +197,90 @@ type UpdateArticleRequest struct {
 	Status     *string `json:"status,omitempty"`
 }
 
-// -- conversation --
+// -- knowledge search --
+
+type SearchRequest struct {
+	Query     string    `json:"query"`
+	Embedding []float32 `json:"embedding,omitempty"` // optional vector for pgvector search
+	Limit     int       `json:"limit"`
+}
+
+type SearchResultItem struct {
+	ID                string  `json:"id"`
+	Title             string  `json:"title"`
+	Content           string  `json:"content"`
+	Category          string  `json:"category"`
+	Attributes        string  `json:"attributes"`
+	KnowledgeBaseName string  `json:"knowledgeBaseName"`
+	Score             float64 `json:"score"`
+}
+
+type SearchResponse struct {
+	Results []SearchResultItem `json:"results"`
+}
+
+// -- conversation messages --
+
+type ConversationMessage struct {
+	ID             string `json:"id"`
+	ConversationID string `json:"conversationId"`
+	CustomerName   string `json:"customerName"`
+	Role           string `json:"role"`
+	Content        string `json:"content"`
+	KnowledgeIDs   string `json:"knowledgeIds"`
+	CreatedAt      string `json:"createdAt"`
+}
+
+type ConversationMessagesResponse struct {
+	Messages []ConversationMessage `json:"messages"`
+}
+
+type SaveMessageRequest struct {
+	ConversationID string `json:"conversationId"`
+	CustomerName   string `json:"customerName"`
+	Role           string `json:"role"`
+	Content        string `json:"content"`
+	KnowledgeIDs   string `json:"knowledgeIds"`
+}
+
+// -- RAG query --
+
+type ConversationQueryRequest struct {
+	ConversationID string `json:"conversationId"`
+	CustomerName   string `json:"customerName"`
+	Message        string `json:"message"`
+	AccountID      string `json:"accountId"`
+	MaxHistory     int    `json:"maxHistory"`
+	MaxKnowledge   int    `json:"maxKnowledge"`
+}
+
+type ConversationQueryResponse struct {
+	SystemPrompt string             `json:"systemPrompt"`
+	Knowledge    []SearchResultItem `json:"knowledge"`
+	History      []HistoryMessage   `json:"history"`
+	ReplyTo      string             `json:"replyTo"`
+}
+
+type HistoryMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// -- conversation list (aggregated from messages) --
+
+type ConversationSummary struct {
+	ConversationID string `json:"conversationId"`
+	CustomerName   string `json:"customerName"`
+	LastMessage    string `json:"lastMessage"`
+	LastMessageAt  string `json:"lastMessageAt"`
+	MessageCount   int    `json:"messageCount"`
+}
+
+type ConversationListResponse struct {
+	Conversations []ConversationSummary `json:"conversations"`
+}
+
+// -- legacy conversation (backward compat) --
 
 type Conversation struct {
 	ID            string `json:"id"`

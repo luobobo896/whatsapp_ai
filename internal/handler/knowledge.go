@@ -10,6 +10,10 @@ import (
 	"whatsapp-ai-poc/internal/store"
 )
 
+func RegisterKnowledgeSearch(r *gin.RouterGroup, st *store.Store) {
+	r.POST("/search", handleSearchKnowledge(st))
+}
+
 func RegisterKnowledge(r *gin.RouterGroup, st *store.Store) {
 	// Base CRUD
 	r.GET("/bases", handleListBases(st))
@@ -156,6 +160,7 @@ func handleCreateArticle(st *store.Store) gin.HandlerFunc {
 			return
 		}
 		article, err := st.CreateArticle(c.Param("id"), req.Title, req.Content, req.Category, req.Attributes)
+		if err == nil { st.ChunkArticle(article.ID, req.Content) }
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to create article."}})
 			return
@@ -182,6 +187,7 @@ func handleUpdateArticle(st *store.Store) gin.HandlerFunc {
 			return
 		}
 		article, err := st.UpdateArticle(c.Param("articleId"), req.Title, req.Content, req.Category, req.Attributes, req.Status)
+		if err == nil && req.Content != nil { st.ChunkArticle(article.ID, *req.Content) }
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to update article."}})
 			return
@@ -207,5 +213,27 @@ func handleDeleteArticle(st *store.Store) gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"ok": true})
+	}
+}
+
+func handleSearchKnowledge(st *store.Store) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		session := middleware.GetSession(c)
+		if session == nil || session.ActiveTenantID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "TENANT_REQUIRED", Message: "No tenant selected."}})
+			return
+		}
+		var req model.SearchRequest
+		if err := c.ShouldBindJSON(&req); err != nil || req.Query == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Query is required."}})
+			return
+		}
+		if req.Limit <= 0 { req.Limit = 5 }
+		results, err := st.SearchKnowledge(session.ActiveTenantID, req.Query, req.Embedding, req.Limit)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Search failed."}})
+			return
+		}
+		c.JSON(http.StatusOK, model.SearchResponse{Results: results})
 	}
 }
