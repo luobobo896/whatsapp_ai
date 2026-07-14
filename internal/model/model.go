@@ -1,6 +1,5 @@
 package model
 
-
 // -- request / response types --
 
 type LoginRequest struct {
@@ -68,6 +67,8 @@ type QrLoginResponse struct {
 type AccountStatusResponse struct {
 	Status      string `json:"status"`
 	ConnectedAt string `json:"connectedAt,omitempty"`
+	QrData      string `json:"qrData,omitempty"`
+	ExpiresAt   string `json:"expiresAt,omitempty"`
 }
 
 type ErrorDetail struct {
@@ -122,8 +123,8 @@ func PermissionsForRole(role string) []string {
 // -- tenant list response --
 
 type TenantsResponse struct {
-	PlatformRole string                  `json:"platformRole"`
-	Tenants      []TenantWithMembership  `json:"tenants"`
+	PlatformRole string                 `json:"platformRole"`
+	Tenants      []TenantWithMembership `json:"tenants"`
 }
 
 // -- member --

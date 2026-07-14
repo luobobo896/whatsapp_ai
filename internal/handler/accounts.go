@@ -1,12 +1,15 @@
 package handler
 
 import (
-	"context"
+	"bufio"
+	"bytes"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -20,11 +23,32 @@ import (
 
 var qrCache = map[string]*qrSession{}
 var qrCacheMu sync.Mutex
+var qrBridgePathOnce sync.Once
+var qrBridgePath string
+var qrBridgePathErr error
+
+const qrBridgeTimeout = 25 * time.Second
+
+//go:embed whatsapp_qr_bridge.mjs
+var whatsappQrBridgeScript []byte
 
 type qrSession struct {
 	QrData    string
 	ExpiresAt time.Time
 	AccountID string
+	Cmd       *exec.Cmd
+	Status    string
+	Err       error
+	Events    <-chan qrBridgeEvent
+	Stderr    *bytes.Buffer
+}
+
+type qrBridgeEvent struct {
+	Type      string `json:"type"`
+	QrDataURL string `json:"qrDataUrl,omitempty"`
+	Connected bool   `json:"connected,omitempty"`
+	Message   string `json:"message,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 func init() {
@@ -34,7 +58,11 @@ func init() {
 			qrCacheMu.Lock()
 			now := time.Now()
 			for k, v := range qrCache {
+				if v.Status == "starting" {
+					continue
+				}
 				if now.After(v.ExpiresAt) {
+					stopQrSession(v)
 					delete(qrCache, k)
 				}
 			}
@@ -48,85 +76,196 @@ func isOpenClawAvailable() bool {
 	return err == nil
 }
 
-// getQRFromCLI runs openclaw channels login via script PTY and extracts clean QR text.
-func getQRFromCLI(accountKey string) (string, error) {
-	if !isOpenClawAvailable() {
-		return "", fmt.Errorf("openclaw 未安装")
+func parseQrBridgeEvent(line []byte) (qrBridgeEvent, error) {
+	var event qrBridgeEvent
+	if err := json.Unmarshal(bytes.TrimSpace(line), &event); err != nil {
+		return qrBridgeEvent{}, err
 	}
-
-	tmpFile, err := os.CreateTemp("", "oc_qr_*.txt")
-	if err != nil {
-		return "", err
-	}
-	tmpPath := tmpFile.Name()
-	tmpFile.Close()
-	defer os.Remove(tmpPath)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "script", "-q", tmpPath,
-		"openclaw", "channels", "login", "--channel", "whatsapp", "--account", accountKey)
-	cmd.Start()
-
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	select {
-	case <-time.After(10 * time.Second):
-		cmd.Process.Kill()
-		<-done
-	case <-done:
-	}
-
-	data, _ := os.ReadFile(tmpPath)
-	if len(data) == 0 {
-		return "", fmt.Errorf("未能获取二维码")
-	}
-	return string(data), nil
+	return event, nil
 }
 
-// cleanQROutput strips terminal control sequences, keeping QR block characters.
-func cleanQROutput(raw string) string {
-	var buf strings.Builder
-	esc := byte(0x1b)
-	i := 0
-	for i < len(raw) {
-		c := raw[i]
-		if c == esc && i+1 < len(raw) && raw[i+1] == '[' {
-			// Skip CSI sequence: ESC[ ... letter
-			end := i + 2
-			for end < len(raw) && end-i < 20 {
-				b := raw[end]
-				if (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') {
-					end++
-					break
-				}
-				end++
-			}
-			i = end
-			continue
+func resolveWhatsAppLoginModule() (string, error) {
+	if configured := strings.TrimSpace(os.Getenv("OPENCLAW_WHATSAPP_LOGIN_MODULE")); configured != "" {
+		if _, err := os.Stat(configured); err != nil {
+			return "", fmt.Errorf("OpenClaw WhatsApp 登录模块不存在: %w", err)
 		}
-		if c == esc && i+1 < len(raw) && raw[i+1] == ']' {
-			// Skip OSC sequence: ESC] ... BEL or ST
-			end := i + 2
-			for end < len(raw) && end-i < 200 {
-				if raw[end] == 0x07 || (raw[end] == esc && end+1 < len(raw) && raw[end+1] == '\\') {
-					end += 2
-					break
-				}
-				end++
-			}
-			i = end
-			continue
-		}
-		if c == '\r' || c == 0x04 {
-			i++
-			continue
-		}
-		buf.WriteByte(c)
-		i++
+		return configured, nil
 	}
-	return buf.String()
+
+	output, err := exec.Command("openclaw", "plugins", "list", "--json").Output()
+	if err == nil {
+		var payload struct {
+			Plugins []struct {
+				ID      string `json:"id"`
+				RootDir string `json:"rootDir"`
+				Source  string `json:"source"`
+			} `json:"plugins"`
+		}
+		if json.Unmarshal(output, &payload) == nil {
+			for _, plugin := range payload.Plugins {
+				if plugin.ID != "whatsapp" {
+					continue
+				}
+				root := plugin.RootDir
+				if root == "" && plugin.Source != "" {
+					root = filepath.Dir(filepath.Dir(plugin.Source))
+				}
+				if root != "" {
+					module := filepath.Join(root, "dist", "login-qr-runtime.js")
+					if _, statErr := os.Stat(module); statErr == nil {
+						return module, nil
+					}
+				}
+			}
+		}
+	}
+
+	home, homeErr := os.UserHomeDir()
+	if homeErr == nil {
+		fallback := filepath.Join(home, ".openclaw", "extensions", "whatsapp", "dist", "login-qr-runtime.js")
+		if _, statErr := os.Stat(fallback); statErr == nil {
+			return fallback, nil
+		}
+	}
+	if err != nil {
+		return "", fmt.Errorf("无法定位 OpenClaw WhatsApp 登录模块: %w", err)
+	}
+	return "", fmt.Errorf("无法定位 OpenClaw WhatsApp 登录模块")
+}
+
+func qrBridgeScriptPath() (string, error) {
+	qrBridgePathOnce.Do(func() {
+		file, err := os.CreateTemp("", "whatsapp-ai-qr-bridge-*.mjs")
+		if err != nil {
+			qrBridgePathErr = err
+			return
+		}
+		qrBridgePath = file.Name()
+		if _, err = file.Write(whatsappQrBridgeScript); err != nil {
+			qrBridgePathErr = err
+			file.Close()
+			return
+		}
+		if err = file.Close(); err != nil {
+			qrBridgePathErr = err
+		}
+	})
+	return qrBridgePath, qrBridgePathErr
+}
+
+func startQrSession(accountID, accountKey string) (*qrSession, error) {
+	if !isOpenClawAvailable() {
+		return nil, fmt.Errorf("openclaw 未安装")
+	}
+	modulePath, err := resolveWhatsAppLoginModule()
+	if err != nil {
+		return nil, err
+	}
+	bridgePath, err := qrBridgeScriptPath()
+	if err != nil {
+		return nil, fmt.Errorf("创建二维码桥接脚本失败: %w", err)
+	}
+
+	cmd := exec.Command("node", bridgePath, modulePath, accountKey)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	events := make(chan qrBridgeEvent, 8)
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			event, err := parseQrBridgeEvent(scanner.Bytes())
+			if err == nil {
+				events <- event
+			}
+		}
+		close(events)
+	}()
+
+	var first qrBridgeEvent
+	var ok bool
+	select {
+	case first, ok = <-events:
+		if !ok {
+			cmd.Wait()
+			if stderr.Len() > 0 {
+				return nil, fmt.Errorf("OpenClaw 二维码进程未返回结果: %s", strings.TrimSpace(stderr.String()))
+			}
+			return nil, fmt.Errorf("OpenClaw 二维码进程未返回结果")
+		}
+	case <-time.After(qrBridgeTimeout):
+		stopQrProcess(cmd)
+		_ = cmd.Wait()
+		return nil, fmt.Errorf("获取二维码超时")
+	}
+	if first.Type == "error" || !strings.HasPrefix(first.QrDataURL, "data:image/png;base64,") {
+		stopQrProcess(cmd)
+		_ = cmd.Wait()
+		if first.Error != "" {
+			return nil, fmt.Errorf("获取二维码失败: %s", first.Error)
+		}
+		return nil, fmt.Errorf("OpenClaw 未返回 PNG 二维码")
+	}
+
+	session := &qrSession{
+		QrData:    first.QrDataURL,
+		ExpiresAt: time.Now().Add(30 * time.Second),
+		AccountID: accountID,
+		Cmd:       cmd,
+		Status:    "qr_pending",
+		Events:    events,
+		Stderr:    &stderr,
+	}
+	return session, nil
+}
+
+func monitorQrSession(session *qrSession, events <-chan qrBridgeEvent, stderr *bytes.Buffer) {
+	for event := range events {
+		qrCacheMu.Lock()
+		current, ok := qrCache[session.AccountID]
+		if ok && current == session {
+			switch {
+			case event.Type == "qr" && strings.HasPrefix(event.QrDataURL, "data:image/png;base64,"):
+				session.QrData = event.QrDataURL
+				session.ExpiresAt = time.Now().Add(30 * time.Second)
+			case event.Type == "status" && event.Connected:
+				session.Status = "connected"
+			case event.Type == "error":
+				session.Err = fmt.Errorf("%s", event.Error)
+			}
+		}
+		qrCacheMu.Unlock()
+	}
+	if err := session.Cmd.Wait(); err != nil {
+		qrCacheMu.Lock()
+		if current, ok := qrCache[session.AccountID]; ok && current == session && session.Status != "connected" && session.Err == nil {
+			message := strings.TrimSpace(stderr.String())
+			if message == "" {
+				message = err.Error()
+			}
+			session.Err = fmt.Errorf("%s", message)
+		}
+		qrCacheMu.Unlock()
+	}
+}
+
+func stopQrProcess(cmd *exec.Cmd) {
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+}
+
+func stopQrSession(session *qrSession) {
+	if session != nil && session.Status != "connected" {
+		stopQrProcess(session.Cmd)
+	}
 }
 
 func RegisterAccounts(r *gin.RouterGroup, st *store.Store) {
@@ -220,26 +359,31 @@ func handleQrLogin(st *store.Store) gin.HandlerFunc {
 		}
 
 		qrCacheMu.Lock()
-		delete(qrCache, accountID)
-		qrCacheMu.Unlock()
-
-		// Use CLI to get QR code
-		raw, err := getQRFromCLI(acct.AccountKey)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "OPENCLAW_ERROR", Message: "获取二维码失败: " + err.Error()}})
+		previous := qrCache[accountID]
+		if previous != nil && previous.Status == "starting" {
+			qrCacheMu.Unlock()
+			c.JSON(http.StatusConflict, gin.H{"error": model.ErrorDetail{Code: "QR_IN_PROGRESS", Message: "QR login is already being started for this account."}})
 			return
 		}
-
-		qrData := cleanQROutput(raw)
-
-		expiresAt := time.Now().Add(30 * time.Second)
-		qrCacheMu.Lock()
-		qrCache[accountID] = &qrSession{QrData: qrData, ExpiresAt: expiresAt, AccountID: accountID}
+		qrCache[accountID] = &qrSession{AccountID: accountID, Status: "starting"}
 		qrCacheMu.Unlock()
+		stopQrSession(previous)
+
+		qr, err := startQrSession(accountID, acct.AccountKey)
+		qrCacheMu.Lock()
+		if err != nil {
+			delete(qrCache, accountID)
+			qrCacheMu.Unlock()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "OPENCLAW_ERROR", Message: err.Error()}})
+			return
+		}
+		qrCache[accountID] = qr
+		qrCacheMu.Unlock()
+		go monitorQrSession(qr, qr.Events, qr.Stderr)
 
 		c.JSON(http.StatusOK, model.QrLoginResponse{
-			QrData:    qrData,
-			ExpiresAt: expiresAt.Format("2006-01-02 15:04:05"),
+			QrData:    qr.QrData,
+			ExpiresAt: qr.ExpiresAt.Format(time.RFC3339),
 			AccountID: accountID,
 		})
 	}
@@ -259,17 +403,36 @@ func handleQrStatus(st *store.Store) gin.HandlerFunc {
 			return
 		}
 
+		resp := model.AccountStatusResponse{Status: acct.Status}
 		qrCacheMu.Lock()
-		_, hasQR := qrCache[accountID]
+		qr := qrCache[accountID]
+		if qr != nil {
+			switch {
+			case qr.Status == "starting":
+				// still waiting for startQrSession to complete
+			case qr.Status == "connected":
+				resp.Status = "connected"
+				resp.ConnectedAt = time.Now().Format("2006-01-02 15:04:05")
+				delete(qrCache, accountID)
+			case time.Now().Before(qr.ExpiresAt):
+				resp.Status = "qr_pending"
+				resp.QrData = qr.QrData
+				resp.ExpiresAt = qr.ExpiresAt.Format(time.RFC3339)
+			default:
+				stopQrSession(qr)
+				delete(qrCache, accountID)
+			}
+		}
 		qrCacheMu.Unlock()
 
-		resp := model.AccountStatusResponse{Status: acct.Status}
-		if hasQR {
-			resp.Status = "qr_pending"
+		if resp.Status == "connected" {
+			st.UpdateAccount(session.ActiveTenantID, accountID, "", "", "connected", nil, nil)
+			c.JSON(http.StatusOK, resp)
+			return
 		}
 
 		if isOpenClawAvailable() {
-			out, err := exec.Command("openclaw", "channels", "status", "--channel", "whatsapp", "--json").Output()
+			out, err := exec.Command("openclaw", "channels", "status", "--channel", "whatsapp", "--account", acct.AccountKey, "--json").Output()
 			if err == nil {
 				var sr struct {
 					Channels map[string]struct {
@@ -283,6 +446,7 @@ func handleQrStatus(st *store.Store) gin.HandlerFunc {
 						resp.ConnectedAt = time.Now().Format("2006-01-02 15:04:05")
 						st.UpdateAccount(session.ActiveTenantID, accountID, "", "", "connected", nil, nil)
 						qrCacheMu.Lock()
+						stopQrSession(qrCache[accountID])
 						delete(qrCache, accountID)
 						qrCacheMu.Unlock()
 					}
@@ -311,6 +475,7 @@ func handleDisconnect(st *store.Store) gin.HandlerFunc {
 		exec.Command("openclaw", "channels", "logout", "--channel", "whatsapp", "--account", acct.AccountKey).Run()
 
 		qrCacheMu.Lock()
+		stopQrSession(qrCache[accountID])
 		delete(qrCache, accountID)
 		qrCacheMu.Unlock()
 

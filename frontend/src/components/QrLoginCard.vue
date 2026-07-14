@@ -20,66 +20,17 @@ onUnmounted(() => {
   clearInterval(pollTimer);
 });
 
-function renderQrToDataUrl(raw) {
-  const lines = raw.split("\n");
-  const qrLines = [];
-  for (const line of lines) {
-    // Preserve leading/trailing spaces — they are white QR cells
-    const clean = line.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").replace(/\x1b/g, "").replace(/\r/g, "");
-    if (!clean.trim()) continue;
-    if (/[▄▀█▌▐▖▗▘▙▚▛▜▝▞▟]/.test(clean)) {
-      qrLines.push(clean);
-    }
-  }
-  if (!qrLines.length) return null;
-
-  const rows = qrLines.length * 2;
-  const cols = Math.max(...qrLines.map(l => [...l].length));
-  if (cols === 0 || rows === 0) return null;
-
-  const grid = [];
-  for (let r = 0; r < rows; r++) grid.push(new Array(cols).fill(false));
-
-  for (let i = 0; i < qrLines.length; i++) {
-    const chars = [...qrLines[i]];
-    for (let j = 0; j < chars.length; j++) {
-      const ch = chars[j];
-      const top = i * 2, bottom = i * 2 + 1;
-      switch (ch) {
-        case "█": grid[top][j] = true; grid[bottom][j] = true; break;
-        case "▀": grid[top][j] = true; break;
-        case "▄": grid[bottom][j] = true; break;
-        default: if (/[▌▐▖▗▘▙▚▛▜▝▞▟■]/.test(ch)) { grid[top][j] = true; grid[bottom][j] = true; }
-      }
-    }
-  }
-
-  const scale = 6;
-  const canvas = document.createElement("canvas");
-  canvas.width = cols * scale;
-  canvas.height = rows * scale;
-  const ctx = canvas.getContext("2d");
-  ctx.fillStyle = "#fff";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = "#000";
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) {
-      if (grid[r][c]) ctx.fillRect(c * scale, r * scale, scale, scale);
-    }
-  }
-  return canvas.toDataURL("image/png");
-}
-
-const qrImageUrl = computed(() => {
-  if (!qrData.value) return null;
-  if (qrData.value.startsWith("data:image")) return qrData.value;
-  return renderQrToDataUrl(qrData.value);
-});
+const qrImageUrl = computed(() => qrData.value || null);
 
 function formatTime(s) {
   const m = Math.floor(s / 60);
   const sec = s % 60;
   return `${m}:${String(sec).padStart(2, "0")}`;
+}
+
+function secondsUntil(expiresAt) {
+  const expires = new Date(expiresAt).getTime();
+  return Number.isFinite(expires) ? Math.max(0, Math.floor((expires - Date.now()) / 1000)) : 30;
 }
 
 async function fetchQr() {
@@ -88,9 +39,7 @@ async function fetchQr() {
   try {
     const resp = await post(`/api/accounts/${props.account.id}/qr-login`, {}, props.csrfToken);
     qrData.value = resp.qrData;
-    const expires = new Date(resp.expiresAt).getTime();
-    const now = Date.now();
-    countdown.value = Math.max(0, Math.floor((expires - now) / 1000));
+    countdown.value = secondsUntil(resp.expiresAt);
     status.value = "qr_pending";
     startCountdown();
     startPolling();
@@ -108,6 +57,8 @@ function startCountdown() {
     countdown.value--;
     if (countdown.value <= 0) {
       clearInterval(timer);
+      clearInterval(pollTimer);
+      qrData.value = "";
       status.value = "expired";
     }
   }, 1000);
@@ -118,6 +69,10 @@ function startPolling() {
   pollTimer = setInterval(async () => {
     try {
       const resp = await get(`/api/accounts/${props.account.id}/qr-status`);
+      if (resp.qrData && resp.qrData !== qrData.value) {
+        qrData.value = resp.qrData;
+        countdown.value = secondsUntil(resp.expiresAt);
+      }
       if (resp.status === "connected") {
         clearInterval(timer);
         clearInterval(pollTimer);
@@ -171,11 +126,11 @@ async function disconnect() {
       <el-button type="danger" :icon="Unplug" :loading="loading" @click="disconnect">断开连接</el-button>
     </div>
 
-    <!-- QR showing: canvas-rendered image + countdown -->
+    <!-- QR showing: native PNG from OpenClaw + countdown -->
     <div v-else-if="qrImageUrl" style="text-align:center">
       <img
         :src="qrImageUrl"
-        style="max-width:100%;height:auto;border:8px solid #fff;border-radius:4px;background:#fff;display:block;margin:0 auto"
+        style="max-width:320px;height:auto;display:block;margin:0 auto"
         alt="WhatsApp QR Code"
       />
       <div style="margin:12px 0 8px">
