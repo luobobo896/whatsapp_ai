@@ -54,6 +54,7 @@ cd cmd/rag-mcp-server && npm install && node index.mjs
 | `DATABASE_URL` | （必填） | PostgreSQL 连接串 |
 | `ADMIN_EMAIL` | `admin@whatsapp-ai.local` | 种子管理员邮箱 |
 | `ADMIN_PASSWORD` | （首次启动必填） | 种子管理员密码 |
+| `COOKIE_SECURE` | `true` | 会话 Cookie 的 Secure 属性；本地 HTTP 开发时显式设为 `false` |
 | `INTERNAL_API_TOKEN` | （必填） | 内部 API Bearer token，OpenClaw MCP 服务调用时使用 |
 
 ## API 总览

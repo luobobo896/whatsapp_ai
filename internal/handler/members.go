@@ -174,7 +174,8 @@ func handleAcceptInvitation(st *store.Store) gin.HandlerFunc {
 		st.UpdateSessionTenant(sess.ID, inv.TenantID)
 		st.DeleteInvitation(inv.ID)
 
-		c.SetCookie("session_id", sess.ID, 86400, "/", "", false, true)
+		c.SetSameSite(http.SameSiteLaxMode)
+		c.SetCookie("session_id", sess.ID, 86400, "/", "", sessionCookieSecure(), true)
 		c.JSON(http.StatusOK, model.AcceptInvitationResponse{
 			TenantID:  inv.TenantID,
 			CSRFToken: sess.CSRFToken,

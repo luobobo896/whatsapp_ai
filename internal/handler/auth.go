@@ -2,6 +2,8 @@ package handler
 
 import (
 	"net/http"
+	"os"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/bcrypt"
@@ -32,7 +34,8 @@ func HandleLogin(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to create session."}})
 			return
 		}
-		c.SetCookie("session_id", sess.ID, 86400, "/", "", false, true)
+		c.SetSameSite(http.SameSiteLaxMode)
+		c.SetCookie("session_id", sess.ID, 86400, "/", "", sessionCookieSecure(), true)
 		c.Status(http.StatusNoContent)
 	}
 }
@@ -43,9 +46,14 @@ func HandleLogout(st *store.Store) gin.HandlerFunc {
 		if err == nil {
 			st.DeleteSession(cookie)
 		}
-		c.SetCookie("session_id", "", -1, "/", "", false, true)
+		c.SetSameSite(http.SameSiteLaxMode)
+		c.SetCookie("session_id", "", -1, "/", "", sessionCookieSecure(), true)
 		c.Status(http.StatusNoContent)
 	}
+}
+
+func sessionCookieSecure() bool {
+	return strings.ToLower(strings.TrimSpace(os.Getenv("COOKIE_SECURE"))) != "false"
 }
 
 func HandleMe(st *store.Store) gin.HandlerFunc {
