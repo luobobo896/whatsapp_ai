@@ -16,7 +16,9 @@ onMounted(async () => {
   try {
     const resp = await get("/api/knowledge/bases");
     knowledgeBases.value = resp.bases || [];
-  } catch { /* ignore */ }
+  } catch (error) {
+    showToast({ tone: "error", message: messageForError(error) });
+  }
 });
 
 async function submit() {
