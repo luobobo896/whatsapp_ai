@@ -60,6 +60,15 @@ func accountKnowledgeBaseIDs(account *model.AccountRow) []string {
 	return ids
 }
 
+func validConversationHistory(history []model.OpenClawMessage) bool {
+	for _, message := range history {
+		if (message.Role != "user" && message.Role != "assistant") || strings.TrimSpace(message.Content) == "" {
+			return false
+		}
+	}
+	return true
+}
+
 func handleInternalConversationQuery(st *store.Store) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req model.ConversationQueryRequest
@@ -69,6 +78,10 @@ func handleInternalConversationQuery(st *store.Store) gin.HandlerFunc {
 		}
 		if req.MaxHistory <= 0 { req.MaxHistory = 10 }
 		if req.MaxKnowledge <= 0 { req.MaxKnowledge = 5 }
+		if !validConversationHistory(req.History) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "History contains an invalid message."}})
+			return
+		}
 
 		tenantID, err := resolveTenantFromAccount(st, req.AccountID)
 		if err != nil {
@@ -202,6 +215,10 @@ func handleConversationQuery(st *store.Store) gin.HandlerFunc {
 		}
 		if req.MaxHistory <= 0 { req.MaxHistory = 10 }
 		if req.MaxKnowledge <= 0 { req.MaxKnowledge = 5 }
+		if !validConversationHistory(req.History) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "History contains an invalid message."}})
+			return
+		}
 		account, err := st.AccountByID(session.ActiveTenantID, req.AccountID)
 		if err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": model.ErrorDetail{Code: "NOT_FOUND", Message: "Account not found."}})
