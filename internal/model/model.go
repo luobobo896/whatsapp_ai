@@ -158,6 +158,42 @@ type KnowledgeBasesResponse struct {
 	Bases []KnowledgeBase `json:"bases"`
 }
 
+type UpdateKnowledgeRequest struct {
+	Name        *string `json:"name,omitempty"`
+	Description *string `json:"description,omitempty"`
+	Status      *string `json:"status,omitempty"`
+}
+
+// -- knowledge article --
+
+type KnowledgeArticle struct {
+	ID              string `json:"id"`
+	KnowledgeBaseID string `json:"knowledgeBaseId"`
+	Title           string `json:"title"`
+	Content         string `json:"content"`
+	Category        string `json:"category"`
+	Status          string `json:"status"`
+	CreatedAt       string `json:"createdAt"`
+	UpdatedAt       string `json:"updatedAt"`
+}
+
+type KnowledgeArticlesResponse struct {
+	Articles []KnowledgeArticle `json:"articles"`
+}
+
+type CreateArticleRequest struct {
+	Title    string `json:"title"`
+	Content  string `json:"content"`
+	Category string `json:"category"`
+}
+
+type UpdateArticleRequest struct {
+	Title    *string `json:"title,omitempty"`
+	Content  *string `json:"content,omitempty"`
+	Category *string `json:"category,omitempty"`
+	Status   *string `json:"status,omitempty"`
+}
+
 // -- conversation --
 
 type Conversation struct {
@@ -250,6 +286,17 @@ type KnowledgeRow struct {
 	Description string
 	Status      string
 	CreatedAt   string
+}
+
+type KnowledgeArticleRow struct {
+	ID              string
+	KnowledgeBaseID string
+	Title           string
+	Content         string
+	Category        string
+	Status          string
+	CreatedAt       string
+	UpdatedAt       string
 }
 
 type ConversationRow struct {

@@ -20,6 +20,8 @@ import CreateKnowledgeDialog from "../components/CreateKnowledgeDialog.vue";
 import InviteMemberDialog from "../components/InviteMemberDialog.vue";
 import TenantCredentialsResult from "../components/TenantCredentialsResult.vue";
 import InvitationResult from "../components/InvitationResult.vue";
+import KnowledgeDetail from "./KnowledgeDetail.vue";
+import EditKnowledgeDialog from "../components/EditKnowledgeDialog.vue";
 
 const { session } = useSession();
 const router = useRouter();
@@ -64,6 +66,9 @@ const createKnowledgeOpen = ref(false);
 const inviteMemberOpen = ref(false);
 const invitation = ref(null);
 const tenantCredentials = ref(null);
+const editKnowledgeOpen = ref(false);
+const editingKnowledgeBase = ref(null);
+const knowledgeBaseId = ref(null);
 
 const activeTenant = computed(() =>
   tenants.value.find((t) => t.id === session.value?.activeTenantId) || null,
@@ -75,6 +80,19 @@ const canManageMembers = computed(() => activeTenant.value?.permissions?.include
 const canManageAccounts = computed(() => activeTenant.value?.permissions?.includes("accounts:manage") || false);
 const canManageKnowledge = computed(() => activeTenant.value?.permissions?.includes("knowledge:manage") || false);
 const isPlatformAdmin = computed(() => !!platformRole.value);
+const selectedKnowledgeBase = computed(() =>
+  knowledgeBases.value.find((b) => b.id === knowledgeBaseId.value) || null,
+);
+
+function navigateToKnowledgeDetail(base) {
+  knowledgeBaseId.value = base.id;
+  view.value = "knowledgeDetail";
+}
+
+function backFromKnowledgeDetail() {
+  knowledgeBaseId.value = null;
+  navigate("knowledge");
+}
 
 onMounted(() => {
   if (!session.value) { router.replace("/login"); return; }
@@ -182,7 +200,14 @@ function navigate(v) {
     <div class="dashboard-main">
       <header class="topbar">
         <div class="topbar-left">
-          <h2>{{ NAV_ITEMS.find((i) => i.id === view)?.label }}</h2>
+          <h2>
+            <template v-if="view === 'knowledgeDetail'">
+              <el-button text @click="backFromKnowledgeDetail" style="font-size:18px;padding:0">&larr; 知识库</el-button>
+              <span style="color:#6b736d;margin:0 6px">/</span>
+              {{ selectedKnowledgeBase?.name || '' }}
+            </template>
+            <template v-else>{{ NAV_ITEMS.find((i) => i.id === view)?.label }}</template>
+          </h2>
           <p>
             {{ activeTenant ? activeTenant.name : isPlatformAdmin ? "平台管理空间" : "尚未选择租户工作区" }}
           </p>
@@ -217,7 +242,25 @@ function navigate(v) {
           :platform-role="platformRole" @navigate="navigate"
         />
         <AccountsView v-if="!loading && view === 'accounts'" :accounts="accounts" :can-manage="canManageAccounts" @create="createAccountOpen = true" />
-        <KnowledgeView v-if="!loading && view === 'knowledge'" :bases="knowledgeBases" :can-manage="canManageKnowledge" @create="createKnowledgeOpen = true" />
+        <KnowledgeView
+          v-if="!loading && view === 'knowledge'"
+          :bases="knowledgeBases" :can-manage="canManageKnowledge"
+          :csrf-token="session?.csrfToken"
+          @create="createKnowledgeOpen = true"
+          @edit="(b) => { editingKnowledgeBase = b; editKnowledgeOpen = true }"
+          @detail="navigateToKnowledgeDetail"
+          @changed="loadData()"
+        />
+        <KnowledgeDetail
+          v-if="!loading && view === 'knowledgeDetail' && selectedKnowledgeBase"
+          :key="knowledgeBaseId"
+          :base="selectedKnowledgeBase"
+          :can-manage="canManageKnowledge"
+          :csrf-token="session?.csrfToken"
+          @back="backFromKnowledgeDetail"
+          @base-updated="() => { editingKnowledgeBase = selectedKnowledgeBase; editKnowledgeOpen = true; }"
+          @articles-changed="loadData()"
+        />
         <ConversationsView v-if="!loading && view === 'conversations'" :conversations="conversations" :accounts="accounts" />
         <TenantsView
           v-if="!loading && view === 'tenants'" :tenants="tenants" :platform-role="platformRole"
@@ -241,5 +284,13 @@ function navigate(v) {
       @close="inviteMemberOpen = false" @invited="(i) => { inviteMemberOpen = false; invitation = i.invitation; }" />
     <TenantCredentialsResult v-if="tenantCredentials" :created="tenantCredentials" @close="tenantCredentials = null" />
     <InvitationResult v-if="invitation" :invitation="invitation" @close="invitation = null" />
+    <EditKnowledgeDialog
+      v-if="editKnowledgeOpen && editingKnowledgeBase"
+      :base="editingKnowledgeBase"
+      :csrf-token="session?.csrfToken"
+      @close="editKnowledgeOpen = false; editingKnowledgeBase = null"
+      @updated="() => { editKnowledgeOpen = false; editingKnowledgeBase = null; loadData(); }"
+      @deleted="() => { editKnowledgeOpen = false; editingKnowledgeBase = null; backFromKnowledgeDetail(); loadData(); }"
+    />
   </div>
 </template>

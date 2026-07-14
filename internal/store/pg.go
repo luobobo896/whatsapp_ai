@@ -84,6 +84,14 @@ func (s *Store) migrate(ctx context.Context) error {
 			status TEXT NOT NULL DEFAULT 'active',
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
+		`CREATE TABLE IF NOT EXISTS knowledge_articles (
+			id TEXT PRIMARY KEY, knowledge_base_id TEXT NOT NULL,
+			title TEXT NOT NULL, content TEXT NOT NULL DEFAULT '',
+			category TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'active',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
 		`CREATE TABLE IF NOT EXISTS conversations (
 			id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL,
 			account_id TEXT NOT NULL, customer TEXT NOT NULL,
@@ -449,6 +457,98 @@ func (s *Store) CreateKnowledgeBase( tenantID, name, description string) (*model
 }
 
 // ---- conversations ----
+
+
+func (s *Store) KnowledgeBaseByID( id, tenantID string) (*model.KnowledgeRow, error) {
+	k := &model.KnowledgeRow{}
+	err := s.pool.QueryRow(context.Background(),
+		`SELECT id,tenant_id,name,description,status,
+		        to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+		 FROM knowledge_bases WHERE id=$1 AND tenant_id=$2`, id, tenantID,
+	).Scan(&k.ID, &k.TenantID, &k.Name, &k.Description, &k.Status, &k.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return k, nil
+}
+
+func (s *Store) UpdateKnowledgeBase( id, tenantID string, name, description, status *string) (*model.KnowledgeRow, error) {
+	q := `UPDATE knowledge_bases SET `
+	args := []any{}
+	idx := 1
+	if name != nil { q += fmt.Sprintf(`name=$%d, `, idx); args = append(args, *name); idx++ }
+	if description != nil { q += fmt.Sprintf(`description=$%d, `, idx); args = append(args, *description); idx++ }
+	if status != nil { q += fmt.Sprintf(`status=$%d, `, idx); args = append(args, *status); idx++ }
+	q = q[:len(q)-2] + fmt.Sprintf(` WHERE id=$%d AND tenant_id=$%d RETURNING id,tenant_id,name,description,status,to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`, idx, idx+1)
+	args = append(args, id, tenantID)
+	k := &model.KnowledgeRow{}
+	err := s.pool.QueryRow(context.Background(), q, args...).Scan(&k.ID, &k.TenantID, &k.Name, &k.Description, &k.Status, &k.CreatedAt)
+	if err != nil { return nil, err }
+	return k, nil
+}
+
+func (s *Store) DeleteKnowledgeBase( id, tenantID string) error {
+	_, err := s.pool.Exec(context.Background(), `DELETE FROM knowledge_bases WHERE id=$1 AND tenant_id=$2`, id, tenantID)
+	return err
+}
+
+func (s *Store) ArticlesByKnowledgeBase( kbID string) ([]model.KnowledgeArticle, error) {
+	rows, err := s.pool.Query(context.Background(),
+		`SELECT id,knowledge_base_id,title,content,category,status,
+		        to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+		        to_char(updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+		 FROM knowledge_articles WHERE knowledge_base_id=$1 ORDER BY created_at`, kbID)
+	if err != nil { return nil, err }
+	defer rows.Close()
+	var list []model.KnowledgeArticle
+	for rows.Next() {
+		var a model.KnowledgeArticle
+		if err := rows.Scan(&a.ID, &a.KnowledgeBaseID, &a.Title, &a.Content, &a.Category, &a.Status, &a.CreatedAt, &a.UpdatedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, a)
+	}
+	if list == nil { list = []model.KnowledgeArticle{} }
+	return list, rows.Err()
+}
+
+func (s *Store) CreateArticle( kbID, title, content, category string) (*model.KnowledgeArticleRow, error) {
+	a := &model.KnowledgeArticleRow{
+		ID: genID(), KnowledgeBaseID: kbID, Title: title,
+		Content: content, Category: category, Status: "active",
+	}
+	err := s.pool.QueryRow(context.Background(),
+		`INSERT INTO knowledge_articles (id,knowledge_base_id,title,content,category)
+		 VALUES ($1,$2,$3,$4,$5)
+		 RETURNING to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+		           to_char(updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`,
+		a.ID, a.KnowledgeBaseID, a.Title, a.Content, a.Category,
+	).Scan(&a.CreatedAt, &a.UpdatedAt)
+	if err != nil { return nil, err }
+	return a, nil
+}
+
+func (s *Store) UpdateArticle( id string, title, content, category, status *string) (*model.KnowledgeArticleRow, error) {
+	q := `UPDATE knowledge_articles SET updated_at=NOW(), `
+	args := []any{}
+	idx := 1
+	if title != nil { q += fmt.Sprintf(`title=$%d, `, idx); args = append(args, *title); idx++ }
+	if content != nil { q += fmt.Sprintf(`content=$%d, `, idx); args = append(args, *content); idx++ }
+	if category != nil { q += fmt.Sprintf(`category=$%d, `, idx); args = append(args, *category); idx++ }
+	if status != nil { q += fmt.Sprintf(`status=$%d, `, idx); args = append(args, *status); idx++ }
+	q = q[:len(q)-2] + fmt.Sprintf(` WHERE id=$%d RETURNING id,knowledge_base_id,title,content,category,status,to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),to_char(updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`, idx)
+	args = append(args, id)
+	a := &model.KnowledgeArticleRow{}
+	err := s.pool.QueryRow(context.Background(), q, args...).Scan(&a.ID, &a.KnowledgeBaseID, &a.Title, &a.Content, &a.Category, &a.Status, &a.CreatedAt, &a.UpdatedAt)
+	if err != nil { return nil, err }
+	return a, nil
+}
+
+func (s *Store) DeleteArticle( id string) error {
+	_, err := s.pool.Exec(context.Background(), `DELETE FROM knowledge_articles WHERE id=$1`, id)
+	return err
+}
+
 
 func (s *Store) ConversationsByTenant( tenantID string) ([]model.Conversation, error) {
 	rows, err := s.pool.Query(context.Background(),

@@ -65,6 +65,13 @@ export function post(path, body, csrfToken) {
   });
 }
 
+export function del(path, csrfToken) {
+  return request(path, {
+    method: "DELETE",
+    headers: { "X-CSRF-Token": csrfToken },
+  });
+}
+
 export function patch(path, body, csrfToken) {
   return request(path, {
     method: "PATCH",
