@@ -98,8 +98,8 @@ cd cmd/rag-mcp-server && npm install && node index.mjs
 | GET | `/api/accounts/:id/qr-status` | 查询扫码登录状态 |
 | POST | `/api/accounts/:id/disconnect` | 断开 WhatsApp 连接 |
 | GET | `/api/conversations` | 会话列表（支持 `?accountId=` 筛选） |
-| GET | `/api/conversations/:id/messages` | 会话消息历史 |
-| DELETE | `/api/conversations/:id` | 删除会话及所有消息 |
+| GET | `/api/conversations/:id/messages?accountId=...` | 指定客服账号下的会话消息历史（`accountId` 必填） |
+| DELETE | `/api/conversations/:id?accountId=...` | 删除指定客服账号下的会话消息（`accountId` 必填） |
 | POST | `/api/conversations/query` | RAG 查询（搜索+记忆+系统提示） |
 | POST | `/api/conversations/messages` | 保存消息 |
 
