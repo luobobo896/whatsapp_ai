@@ -2,8 +2,9 @@ package tenants
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
-	"regexp"
 	"strings"
 
 	"github.com/google/uuid"
@@ -12,21 +13,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"whatsapp-ai-poc/internal/audit"
+	"whatsapp-ai-poc/internal/auth"
 	"whatsapp-ai-poc/internal/members"
 	"whatsapp-ai-poc/internal/platform/apperror"
 	"whatsapp-ai-poc/internal/platform/database"
 )
 
-var slugPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
-
-type InvitationIssuer interface {
-	IssueInTx(context.Context, pgx.Tx, uuid.UUID, uuid.UUID, string, members.Role) (members.IssuedInvitation, error)
-}
-
-type Service struct {
-	pool   *pgxpool.Pool
-	issuer InvitationIssuer
-}
+type Service struct{ pool *pgxpool.Pool }
 
 type Tenant struct {
 	ID     uuid.UUID `json:"id"`
@@ -43,16 +36,22 @@ type AccessibleTenant struct {
 }
 
 type CreateInput struct {
-	Name, Slug, OwnerEmail, OwnerDisplayName string
+	Name string
 }
 
 type Created struct {
-	Tenant     Tenant
-	Invitation members.IssuedInvitation
+	Tenant      Tenant
+	Credentials InitialCredentials
 }
 
-func NewService(pool *pgxpool.Pool, issuer InvitationIssuer) *Service {
-	return &Service{pool: pool, issuer: issuer}
+type InitialCredentials struct {
+	Email       string `json:"email"`
+	Password    string `json:"password"`
+	DisplayName string `json:"displayName"`
+}
+
+func NewService(pool *pgxpool.Pool) *Service {
+	return &Service{pool: pool}
 }
 
 func (s *Service) ListAccessible(ctx context.Context, userID uuid.UUID) ([]AccessibleTenant, string, error) {
@@ -111,37 +110,65 @@ func (s *Service) ListAccessible(ctx context.Context, userID uuid.UUID) ([]Acces
 
 func (s *Service) Create(ctx context.Context, actor audit.Actor, input CreateInput) (Created, error) {
 	input.Name = strings.TrimSpace(input.Name)
-	input.Slug = strings.TrimSpace(input.Slug)
-	input.OwnerEmail = strings.ToLower(strings.TrimSpace(input.OwnerEmail))
-	input.OwnerDisplayName = strings.TrimSpace(input.OwnerDisplayName)
-	if input.Name == "" || input.OwnerDisplayName == "" || !slugPattern.MatchString(input.Slug) || !strings.Contains(input.OwnerEmail, "@") {
-		return Created{}, apperror.Validation("Valid tenant and owner details are required.", nil)
+	if input.Name == "" {
+		return Created{}, apperror.Validation("A tenant name is required.", nil)
 	}
-	tenant := Tenant{ID: uuid.New(), Name: input.Name, Slug: input.Slug, Status: "active"}
+	tenantID := uuid.New()
+	compactID := strings.ReplaceAll(tenantID.String(), "-", "")
+	tenant := Tenant{ID: tenantID, Name: input.Name, Slug: "tenant-" + compactID, Status: "active"}
+	credentials := InitialCredentials{
+		Email:       "admin@" + tenant.Slug + ".local",
+		DisplayName: input.Name + " Admin",
+	}
+	password, err := generatedPassword()
+	if err != nil {
+		return Created{}, err
+	}
+	credentials.Password = password
+	passwordHash, err := auth.HashPassword(password)
+	if err != nil {
+		return Created{}, err
+	}
+	ownerID := uuid.New()
 	created, err := database.WithPlatformTx(ctx, s.pool, func(tx pgx.Tx) (Created, error) {
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO tenants (id, name, slug, status) VALUES ($1, $2, $3, 'active')
 		`, tenant.ID, tenant.Name, tenant.Slug); err != nil {
 			return Created{}, err
 		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO users (id, email, display_name, password_hash, status)
+			VALUES ($1, $2, $3, $4, 'active')
+		`, ownerID, credentials.Email, credentials.DisplayName, passwordHash); err != nil {
+			return Created{}, err
+		}
 		if _, err := tx.Exec(ctx, "SELECT set_config('app.tenant_id', $1, true)", tenant.ID.String()); err != nil {
 			return Created{}, err
 		}
-		invitation, err := s.issuer.IssueInTx(ctx, tx, tenant.ID, actor.UserID, input.OwnerEmail, members.RoleOwner)
-		if err != nil {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO tenant_memberships (tenant_id, user_id, role, status)
+			VALUES ($1, $2, $3, 'active')
+		`, tenant.ID, ownerID, members.RoleOwner); err != nil {
 			return Created{}, err
 		}
-		tenantID := tenant.ID
 		if err := audit.Write(ctx, tx, audit.Event{
 			TenantID: &tenantID, Actor: actor,
 			Action: "tenant.created", TargetType: "tenant", TargetID: tenant.ID.String(), Result: "success",
-			ChangeSummary: map[string]any{"name": tenant.Name, "slug": tenant.Slug, "ownerEmail": input.OwnerEmail, "ownerDisplayName": input.OwnerDisplayName},
+			ChangeSummary: map[string]any{"name": tenant.Name, "slug": tenant.Slug, "ownerEmail": credentials.Email, "ownerUserId": ownerID},
 		}); err != nil {
 			return Created{}, err
 		}
-		return Created{Tenant: tenant, Invitation: invitation}, nil
+		return Created{Tenant: tenant, Credentials: credentials}, nil
 	})
 	return created, tenantConflict(err)
+}
+
+func generatedPassword() (string, error) {
+	raw := make([]byte, 18)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), nil
 }
 
 func (s *Service) SetStatus(ctx context.Context, actor audit.Actor, tenantID uuid.UUID, status, reason string) error {
@@ -182,7 +209,7 @@ func tenantConflict(err error) error {
 	}
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-		return apperror.Conflict("A tenant with this slug already exists.")
+		return apperror.Conflict("Unable to generate unique tenant credentials.")
 	}
 	return err
 }

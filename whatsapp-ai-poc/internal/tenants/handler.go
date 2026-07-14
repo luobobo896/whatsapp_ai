@@ -44,21 +44,18 @@ func (h *handler) listAccessible(c *gin.Context) error {
 
 func (h *handler) create(c *gin.Context) error {
 	var input struct {
-		Name             string `json:"name"`
-		Slug             string `json:"slug"`
-		OwnerEmail       string `json:"ownerEmail"`
-		OwnerDisplayName string `json:"ownerDisplayName"`
+		Name string `json:"name"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
-		return apperror.Validation("Valid tenant and owner details are required.", nil)
+		return apperror.Validation("A tenant name is required.", nil)
 	}
 	result, err := h.service.Create(c.Request.Context(), platformActor(c), CreateInput{
-		Name: input.Name, Slug: input.Slug, OwnerEmail: input.OwnerEmail, OwnerDisplayName: input.OwnerDisplayName,
+		Name: input.Name,
 	})
 	if err != nil {
 		return err
 	}
-	c.JSON(http.StatusCreated, gin.H{"tenant": result.Tenant, "invitation": result.Invitation})
+	c.JSON(http.StatusCreated, gin.H{"tenant": result.Tenant, "credentials": result.Credentials})
 	return nil
 }
 

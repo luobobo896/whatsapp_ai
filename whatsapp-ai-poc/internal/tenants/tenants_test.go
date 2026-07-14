@@ -2,8 +2,6 @@ package tenants_test
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -33,19 +31,21 @@ func TestTenantLifecycle(t *testing.T) {
 	protectedHeaders := map[string]string{"Origin": "http://localhost:8790", "X-CSRF-Token": platformCSRF}
 
 	created := tenantRequest(t, router, http.MethodPost, "/api/platform/tenants", map[string]any{
-		"name": "Acme", "slug": "acme", "ownerEmail": "owner@example.com", "ownerDisplayName": "Owner",
+		"name": "Acme",
 	}, protectedHeaders, platformCookie)
 	if created.Code != http.StatusCreated {
 		t.Fatalf("create tenant status=%d body=%s", created.Code, created.Body.String())
 	}
 	tenantID := uuid.MustParse(tenantJSONNestedString(t, created, "tenant", "id"))
-	invitationToken := tenantJSONNestedString(t, created, "invitation", "token")
-	if invitationToken == "" {
-		t.Fatal("tenant creation did not return the owner invitation token")
+	tenantSlug := tenantJSONNestedString(t, created, "tenant", "slug")
+	ownerEmail := tenantJSONNestedString(t, created, "credentials", "email")
+	ownerPassword := tenantJSONNestedString(t, created, "credentials", "password")
+	if !strings.HasPrefix(tenantSlug, "tenant-") || !strings.HasPrefix(ownerEmail, "admin@tenant-") || len(ownerPassword) < 20 {
+		t.Fatalf("tenant creation did not generate usable credentials: slug=%q email=%q passwordLength=%d", tenantSlug, ownerEmail, len(ownerPassword))
 	}
 	platformTenants := tenantRequest(t, router, http.MethodGet, "/api/tenants", nil, nil, platformCookie)
 	if platformTenants.Code != http.StatusOK || !strings.Contains(platformTenants.Body.String(), `"platformRole":"platform_admin"`) ||
-		!strings.Contains(platformTenants.Body.String(), `"slug":"acme"`) {
+		!strings.Contains(platformTenants.Body.String(), `"slug":"`+tenantSlug+`"`) {
 		t.Fatalf("platform tenant list status=%d body=%s", platformTenants.Code, platformTenants.Body.String())
 	}
 	var platformID uuid.UUID
@@ -63,29 +63,15 @@ func TestTenantLifecycle(t *testing.T) {
 		!strings.Contains(platformMemberTenants.Body.String(), `"metrics:read"`) {
 		t.Fatalf("platform member tenant list status=%d body=%s", platformMemberTenants.Code, platformMemberTenants.Body.String())
 	}
-	var storedHash string
-	if err := admin.QueryRow(t.Context(), "SELECT token_hash FROM member_invitations WHERE tenant_id = $1", tenantID).Scan(&storedHash); err != nil {
-		t.Fatal(err)
-	}
-	digest := sha256.Sum256([]byte(invitationToken))
-	if storedHash != hex.EncodeToString(digest[:]) || storedHash == invitationToken {
-		t.Fatal("owner invitation was not stored as a SHA-256 hash")
-	}
-
-	mismatch := tenantRequest(t, router, http.MethodPost, "/api/invitations/"+invitationToken+"/accept", map[string]any{
-		"email": "attacker@example.com", "displayName": "Attacker", "password": "attacker password",
+	ownerLogin := tenantRequest(t, router, http.MethodPost, "/api/auth/login", map[string]any{
+		"email": ownerEmail, "password": ownerPassword,
 	}, nil, nil)
-	tenantAssertError(t, mismatch, http.StatusForbidden, "FORBIDDEN")
-
-	accepted := tenantRequest(t, router, http.MethodPost, "/api/invitations/"+invitationToken+"/accept", map[string]any{
-		"email": "owner@example.com", "displayName": "Owner", "password": "owner password",
-	}, nil, nil)
-	if accepted.Code != http.StatusCreated {
-		t.Fatalf("accept status=%d body=%s", accepted.Code, accepted.Body.String())
+	if ownerLogin.Code != http.StatusOK {
+		t.Fatalf("generated owner login status=%d body=%s", ownerLogin.Code, ownerLogin.Body.String())
 	}
-	ownerID := uuid.MustParse(tenantJSONNestedString(t, accepted, "user", "id"))
-	ownerCookie := tenantCookie(t, accepted, "wa_session")
-	ownerCSRF := tenantJSONString(t, accepted, "csrfToken")
+	ownerID := uuid.MustParse(tenantJSONNestedString(t, ownerLogin, "user", "id"))
+	ownerCookie := tenantCookie(t, ownerLogin, "wa_session")
+	ownerCSRF := tenantJSONString(t, ownerLogin, "csrfToken")
 	ownerHeaders := map[string]string{"Origin": "http://localhost:8790", "X-CSRF-Token": ownerCSRF}
 	var originalPasswordHash, originalDisplayName string
 	if err := admin.QueryRow(t.Context(), "SELECT password_hash, display_name FROM users WHERE id = $1", ownerID).Scan(&originalPasswordHash, &originalDisplayName); err != nil {
@@ -93,18 +79,39 @@ func TestTenantLifecycle(t *testing.T) {
 	}
 
 	secondTenant := tenantRequest(t, router, http.MethodPost, "/api/platform/tenants", map[string]any{
-		"name": "Second", "slug": "second", "ownerEmail": "owner@example.com", "ownerDisplayName": "Ignored",
+		"name": "Second",
 	}, protectedHeaders, platformCookie)
 	if secondTenant.Code != http.StatusCreated {
 		t.Fatalf("create second tenant status=%d body=%s", secondTenant.Code, secondTenant.Body.String())
 	}
-	secondToken := tenantJSONNestedString(t, secondTenant, "invitation", "token")
+	secondTenantID := uuid.MustParse(tenantJSONNestedString(t, secondTenant, "tenant", "id"))
+	secondEmail := tenantJSONNestedString(t, secondTenant, "credentials", "email")
+	secondPassword := tenantJSONNestedString(t, secondTenant, "credentials", "password")
+	secondLogin := tenantRequest(t, router, http.MethodPost, "/api/auth/login", map[string]any{
+		"email": secondEmail, "password": secondPassword,
+	}, nil, nil)
+	secondCookie := tenantCookie(t, secondLogin, "wa_session")
+	secondCSRF := tenantJSONString(t, secondLogin, "csrfToken")
+	secondHeaders := map[string]string{"Origin": "http://localhost:8790", "X-CSRF-Token": secondCSRF}
+	selectedSecond := tenantRequest(t, router, http.MethodPost, "/api/auth/select-tenant", map[string]any{
+		"tenantId": secondTenantID,
+	}, secondHeaders, secondCookie)
+	if selectedSecond.Code != http.StatusNoContent {
+		t.Fatalf("select second tenant status=%d body=%s", selectedSecond.Code, selectedSecond.Body.String())
+	}
+	secondInvitation := tenantRequest(t, router, http.MethodPost, "/api/members/invitations", map[string]any{
+		"email": ownerEmail, "role": "owner",
+	}, secondHeaders, secondCookie)
+	if secondInvitation.Code != http.StatusCreated {
+		t.Fatalf("invite existing owner status=%d body=%s", secondInvitation.Code, secondInvitation.Body.String())
+	}
+	secondToken := tenantJSONNestedString(t, secondInvitation, "invitation", "token")
 	takeover := tenantRequest(t, router, http.MethodPost, "/api/invitations/"+secondToken+"/accept", map[string]any{
-		"email": "owner@example.com", "displayName": "Hijacked", "password": "attacker password",
+		"email": ownerEmail, "displayName": "Hijacked", "password": "attacker password",
 	}, nil, nil)
 	tenantAssertError(t, takeover, http.StatusUnauthorized, "AUTH_INVALID")
 	acceptedExisting := tenantRequest(t, router, http.MethodPost, "/api/invitations/"+secondToken+"/accept", map[string]any{
-		"email": "owner@example.com", "displayName": "Hijacked", "password": "owner password",
+		"email": ownerEmail, "displayName": "Hijacked", "password": ownerPassword,
 	}, nil, nil)
 	if acceptedExisting.Code != http.StatusCreated {
 		t.Fatalf("existing user acceptance status=%d body=%s", acceptedExisting.Code, acceptedExisting.Body.String())
@@ -118,7 +125,7 @@ func TestTenantLifecycle(t *testing.T) {
 	}
 	ownerTenants := tenantRequest(t, router, http.MethodGet, "/api/tenants", nil, nil, ownerCookie)
 	if ownerTenants.Code != http.StatusOK || strings.Contains(ownerTenants.Body.String(), `"platformRole":"platform_admin"`) ||
-		!strings.Contains(ownerTenants.Body.String(), `"slug":"acme"`) || !strings.Contains(ownerTenants.Body.String(), `"slug":"second"`) ||
+		!strings.Contains(ownerTenants.Body.String(), `"slug":"`+tenantSlug+`"`) || !strings.Contains(ownerTenants.Body.String(), tenantJSONNestedString(t, secondTenant, "tenant", "slug")) ||
 		!strings.Contains(ownerTenants.Body.String(), `"role":"owner"`) || !strings.Contains(ownerTenants.Body.String(), `"members:manage"`) {
 		t.Fatalf("owner tenant list status=%d body=%s", ownerTenants.Code, ownerTenants.Body.String())
 	}
@@ -129,8 +136,32 @@ func TestTenantLifecycle(t *testing.T) {
 	if selected.Code != http.StatusNoContent {
 		t.Fatalf("select tenant status=%d body=%s", selected.Code, selected.Body.String())
 	}
+	createdAccount := tenantRequest(t, router, http.MethodPost, "/api/accounts", map[string]any{
+		"name": "WhatsApp Support", "dailyLimit": 30,
+	}, ownerHeaders, ownerCookie)
+	if createdAccount.Code != http.StatusCreated || !strings.Contains(createdAccount.Body.String(), `"status":"pending"`) {
+		t.Fatalf("create account status=%d body=%s", createdAccount.Code, createdAccount.Body.String())
+	}
+	accounts := tenantRequest(t, router, http.MethodGet, "/api/accounts", nil, nil, ownerCookie)
+	if accounts.Code != http.StatusOK || !strings.Contains(accounts.Body.String(), "WhatsApp Support") {
+		t.Fatalf("account list status=%d body=%s", accounts.Code, accounts.Body.String())
+	}
+	createdBase := tenantRequest(t, router, http.MethodPost, "/api/knowledge/bases", map[string]any{
+		"name": "Product Knowledge", "description": "Product catalog and policies",
+	}, ownerHeaders, ownerCookie)
+	if createdBase.Code != http.StatusCreated {
+		t.Fatalf("create knowledge base status=%d body=%s", createdBase.Code, createdBase.Body.String())
+	}
+	bases := tenantRequest(t, router, http.MethodGet, "/api/knowledge/bases", nil, nil, ownerCookie)
+	if bases.Code != http.StatusOK || !strings.Contains(bases.Body.String(), "Product Knowledge") {
+		t.Fatalf("knowledge base list status=%d body=%s", bases.Code, bases.Body.String())
+	}
+	conversations := tenantRequest(t, router, http.MethodGet, "/api/conversations", nil, nil, ownerCookie)
+	if conversations.Code != http.StatusOK || !strings.Contains(conversations.Body.String(), `"conversations":[]`) {
+		t.Fatalf("conversation list status=%d body=%s", conversations.Code, conversations.Body.String())
+	}
 	reinviteOwner := tenantRequest(t, router, http.MethodPost, "/api/members/invitations", map[string]any{
-		"email": "owner@example.com", "role": "viewer",
+		"email": ownerEmail, "role": "viewer",
 	}, ownerHeaders, ownerCookie)
 	tenantAssertError(t, reinviteOwner, http.StatusConflict, "CONFLICT")
 
@@ -154,7 +185,7 @@ func TestTenantLifecycle(t *testing.T) {
 	}
 
 	members := tenantRequest(t, router, http.MethodGet, "/api/members", nil, nil, ownerCookie)
-	if members.Code != http.StatusOK || !strings.Contains(members.Body.String(), "owner@example.com") {
+	if members.Code != http.StatusOK || !strings.Contains(members.Body.String(), ownerEmail) {
 		t.Fatalf("member list status=%d body=%s", members.Code, members.Body.String())
 	}
 
@@ -180,7 +211,7 @@ func TestTenantLifecycle(t *testing.T) {
 	if err := admin.QueryRow(t.Context(), "SELECT count(*) FROM audit_logs WHERE tenant_id = $1", tenantID).Scan(&audits); err != nil {
 		t.Fatal(err)
 	}
-	if audits < 4 {
+	if audits < 3 {
 		t.Fatalf("expected lifecycle audit records, got %d", audits)
 	}
 }

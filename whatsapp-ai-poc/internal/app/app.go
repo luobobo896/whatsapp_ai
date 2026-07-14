@@ -12,6 +12,7 @@ import (
 	web "whatsapp-ai-poc/frontend"
 	"whatsapp-ai-poc/internal/auth"
 	"whatsapp-ai-poc/internal/members"
+	"whatsapp-ai-poc/internal/operations"
 	"whatsapp-ai-poc/internal/platform/config"
 	"whatsapp-ai-poc/internal/platform/httpx"
 	"whatsapp-ai-poc/internal/tenants"
@@ -35,8 +36,9 @@ func New(cfg config.Config, pool *pgxpool.Pool, pinger Pinger) *gin.Engine {
 		auth.RegisterRoutes(router, cfg, pool)
 		memberService := members.NewService(pool, cfg.SessionTTL)
 		members.RegisterRoutes(router, cfg, pool, memberService)
-		tenantService := tenants.NewService(pool, memberService)
+		tenantService := tenants.NewService(pool)
 		tenants.RegisterRoutes(router, cfg, pool, tenantService)
+		operations.RegisterRoutes(router, cfg, pool, operations.NewService(pool))
 	}
 	frontendHandler := web.Handler()
 	router.NoRoute(func(c *gin.Context) {

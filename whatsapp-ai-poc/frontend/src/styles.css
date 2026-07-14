@@ -516,6 +516,11 @@ code {
   gap: 4px;
 }
 
+.nav-section {
+  display: grid;
+  gap: 4px;
+}
+
 .nav-section-label {
   padding: 21px 10px 7px;
   color: var(--sidebar-muted);
@@ -1108,6 +1113,15 @@ td strong {
   font-size: 11px;
 }
 
+.credential-field {
+  display: grid;
+  gap: 7px;
+  margin-top: 12px;
+  color: var(--body);
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .toast {
   position: fixed;
   z-index: 150;
@@ -1164,6 +1178,10 @@ td strong {
     flex: 0 0 auto;
     align-items: center;
     gap: 4px;
+  }
+
+  .nav-section {
+    display: contents;
   }
 
   .nav-section-label,

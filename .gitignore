@@ -1,8 +1,21 @@
 # Isolated worktrees
 .claude/worktrees/
+**/.worktrees/
+
+# Local planning and review artifacts
+.claude/scheduled_tasks.lock
+.claude/wayfinder/
+**/.code-review-graph/
+**/.superpowers/
+
+# macOS metadata
+.DS_Store
 
 # Dependencies
 node_modules/
 
 # Environment
 .env
+
+# Runtime artifacts
+logs/

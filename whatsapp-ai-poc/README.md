@@ -1,13 +1,14 @@
-# WhatsApp AI Foundation
+# WhatsApp AI 智能客服
 
-WhatsApp AI commercial MVP 的 Go/PostgreSQL 基础阶段。当前后端提供严格运行配置、checksummed migrations、强制 RLS、服务端会话、CSRF、RBAC、租户/成员生命周期、审计和只读遗留数据盘点。
+WhatsApp AI 智能客服的 Go/PostgreSQL 服务。当前后端提供严格运行配置、checksummed migrations、强制 RLS、服务端会话、CSRF、RBAC、租户/成员生命周期、客服账号、知识库、会话列表、审计和只读遗留数据盘点。
 
-当前管理端使用 React/Vite 独立开发，生产构建产物通过 Go `embed` 打包进服务。`src/` 下的旧 JavaScript 仅保留为迁移参考，不是运行、测试或部署入口。OpenClaw 消息处理、知识服务、会话流和 SSE 仍属于后续阶段。
+系统由 Go 管理服务和 React/Vite 管理端组成。生产前端通过 Go `embed` 打包。WhatsApp 消息收发由外部独立组件通过 CLI 对接，不在本项目内。
 
 ## 环境要求
 
 - Go 1.26
 - PostgreSQL 17
+- Node.js 与 pnpm 11（仅前端开发和构建需要）
 - Docker-compatible daemon（仅集成测试需要）
 
 复制 [.env.example](.env.example) 后，通过进程环境注入变量。服务不会自动加载 `.env`。
@@ -42,7 +43,7 @@ pnpm --dir frontend run build
 
 本地需要独立调试前端时可运行 `pnpm --dir frontend run dev`，Vite 会将 `/api` 和 `/health` 代理到 `127.0.0.1:8790`。此时后端的 `APP_ORIGIN` 需要设为 Vite 地址（默认 `http://localhost:5173`），保证写请求通过 Origin/CSRF 校验。生产和日常启动不需要单独运行前端进程。
 
-## Foundation API
+## API
 
 ```text
 POST  /api/auth/login
@@ -54,11 +55,19 @@ GET   /api/tenants
 POST  /api/platform/tenants
 PATCH /api/platform/tenants/:tenantId/status
 
+GET   /api/accounts
+POST  /api/accounts
+GET   /api/knowledge/bases
+POST  /api/knowledge/bases
+GET   /api/conversations
+
 GET   /api/members
 POST  /api/members/invitations
 POST  /api/invitations/:token/accept
 PATCH /api/members/:userId
 ```
+
+平台管理员创建租户时只提交租户名称。服务端自动生成内部标识、初始 owner 登录账号和随机密码；明文密码只在创建响应中返回一次，不写入数据库或审计日志。
 
 所有变更型认证请求必须携带精确 `Origin` 和 `X-CSRF-Token`。Tenant 权限来自服务端 session 的 selected tenant；请求 body、query 或 path 中的 tenant ID 不能作为访问凭据。
 

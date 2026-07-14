@@ -19,4 +19,4 @@ mkdir -p "$PROJECT_ROOT/logs"
 (cd "$PROJECT_ROOT" && env HTTP_HOST="${HTTP_HOST:-127.0.0.1}" PORT="$ADMIN_PORT" APP_ORIGIN="${APP_ORIGIN:-http://127.0.0.1:$ADMIN_PORT}" nohup go run ./cmd/server > logs/admin-server-8790.out.log 2> logs/admin-server-8790.err.log < /dev/null &)
 
 echo "Admin:   http://127.0.0.1:$ADMIN_PORT"
-echo "Note:    OpenClaw Gateway must be started separately: bash scripts/start-gateway.sh"
+echo "Admin backend started."
