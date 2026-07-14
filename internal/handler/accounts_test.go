@@ -168,6 +168,23 @@ func TestApplyLiveAccountStatusesClearsStaleConnection(t *testing.T) {
 	}
 }
 
+func TestAccountStatusSyncUsesIndependentCopy(t *testing.T) {
+	responseAccounts := []model.Account{{
+		ID: "account-1", AccountKey: "wa_support", Status: "connected",
+	}}
+	syncAccounts := accountsForLiveStatusSync(responseAccounts)
+	applyLiveAccountStatuses(syncAccounts, map[string]channelConnectionStatus{
+		"wa_support": {Known: true},
+	})
+
+	if responseAccounts[0].Status != "connected" {
+		t.Fatalf("response status = %q, want connected", responseAccounts[0].Status)
+	}
+	if syncAccounts[0].Status != "pending" {
+		t.Fatalf("sync status = %q, want pending", syncAccounts[0].Status)
+	}
+}
+
 func TestParseWhatsAppChannelStatusUsesRequestedAccount(t *testing.T) {
 	payload := []byte(`{
   "channels": {

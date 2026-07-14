@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -404,6 +405,10 @@ func applyLiveAccountStatuses(accounts []model.Account, statuses map[string]chan
 	return changed
 }
 
+func accountsForLiveStatusSync(accounts []model.Account) []model.Account {
+	return append([]model.Account(nil), accounts...)
+}
+
 func resolveWhatsAppLoginModule() (string, error) {
 	if configured := strings.TrimSpace(os.Getenv("OPENCLAW_WHATSAPP_LOGIN_MODULE")); configured != "" {
 		if _, err := os.Stat(configured); err != nil {
@@ -659,12 +664,15 @@ func handleListAccounts(st *store.Store) gin.HandlerFunc {
 		if isOpenClawAvailable() {
 			// Sync live status in background — shelling out to openclaw is slow.
 			tenantID := session.ActiveTenantID
-			go func() {
+			accountsForSync := accountsForLiveStatusSync(accounts)
+			go func(accounts []model.Account) {
 				statuses := readAllWhatsAppChannelStatuses()
 				for _, account := range applyLiveAccountStatuses(accounts, statuses) {
-					_, _ = st.UpdateAccount(tenantID, account.ID, "", account.Status, nil, nil, nil)
+					if _, err := st.UpdateAccount(tenantID, account.ID, "", account.Status, nil, nil, nil); err != nil {
+						slog.Default().Warn("persist live account status", "tenant_id", tenantID, "account_id", account.ID, "error", err)
+					}
 				}
-			}()
+			}(accountsForSync)
 		}
 		c.JSON(http.StatusOK, model.AccountsResponse{Accounts: accounts})
 	}
