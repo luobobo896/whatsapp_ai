@@ -30,14 +30,10 @@ func main() {
 func run() error {
 	host := env("HTTP_HOST", "127.0.0.1")
 	port := env("PORT", "8790")
-	dbPath := env("DB_PATH", "data/app.db")
+	dbDSN := env("DATABASE_URL", "postgres://admin:aircen123@new.hsddns.com:5432/whatsapp_ai?sslmode=disable")
 
-	// Ensure data dir exists
-	if err := os.MkdirAll("data", 0755); err != nil {
-		return fmt.Errorf("create data dir: %w", err)
-	}
-
-	st, err := store.Open(dbPath)
+	ctx := context.Background()
+	st, err := store.Open(ctx, dbDSN)
 	if err != nil {
 		return fmt.Errorf("open store: %w", err)
 	}
