@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"whatsapp-ai-poc/internal/model"
@@ -573,12 +574,31 @@ func (s *Store) CreateKnowledgeBase( tenantID, name, description string) (*model
 
 // ---- conversations ----
 
-func (s *Store) SearchKnowledge( tenantID, query string, embedding []float32, limit int) ([]model.SearchResultItem, error) {
+func (s *Store) SearchKnowledge(tenantID, query string, embedding []float32, limit int) ([]model.SearchResultItem, error) {
+	return s.searchKnowledge(tenantID, nil, query, embedding, limit)
+}
+
+// SearchKnowledgeForBases limits a search to the account's explicitly bound
+// knowledge bases. An account without bindings cannot read tenant-wide content.
+func (s *Store) SearchKnowledgeForBases(tenantID string, baseIDs []string, query string, embedding []float32, limit int) ([]model.SearchResultItem, error) {
+	if len(baseIDs) == 0 {
+		return []model.SearchResultItem{}, nil
+	}
+	return s.searchKnowledge(tenantID, baseIDs, query, embedding, limit)
+}
+
+func (s *Store) searchKnowledge(tenantID string, baseIDs []string, query string, embedding []float32, limit int) ([]model.SearchResultItem, error) {
 	if limit <= 0 { limit = 5 }
-		// Vector search via Go cosine similarity if embedding provided
-		if len(embedding) > 0 {
-			rows, err := s.pool.Query(context.Background(),
-				"SELECT a.id, a.title, a.content, a.category, a.attributes, k.name AS kb_name, c.id, c.embedding FROM knowledge_chunks c JOIN knowledge_articles a ON c.article_id = a.id JOIN knowledge_bases k ON a.knowledge_base_id = k.id WHERE k.tenant_id=$1 AND a.status='active' AND k.status='active' AND c.embedding IS NOT NULL", tenantID)
+	// Vector search via Go cosine similarity if embedding provided.
+	if len(embedding) > 0 {
+		vectorArgs := []any{tenantID}
+		baseFilter := ""
+		if len(baseIDs) > 0 {
+			baseFilter = " AND k.id = ANY($2)"
+			vectorArgs = append(vectorArgs, baseIDs)
+		}
+		rows, err := s.pool.Query(context.Background(),
+			"SELECT a.id, a.title, a.content, a.category, a.attributes, k.name AS kb_name, c.id, c.embedding FROM knowledge_chunks c JOIN knowledge_articles a ON c.article_id = a.id JOIN knowledge_bases k ON a.knowledge_base_id = k.id WHERE k.tenant_id=$1 AND a.status='active' AND k.status='active' AND c.embedding IS NOT NULL"+baseFilter, vectorArgs...)
 			if err == nil {
 				defer rows.Close()
 				type row struct {
@@ -621,8 +641,8 @@ func (s *Store) SearchKnowledge( tenantID, query string, embedding []float32, li
 					}
 				}
 				if len(list) > 0 { return list, nil }
-			}
 		}
+	}
 	// ILIKE fallback for Chinese text
 	words := splitQuery(query)
 	// Cap at 10 tokens to avoid SQL explosion; pg_trgm GIN indexes handle ILIKE efficiently
@@ -631,7 +651,13 @@ func (s *Store) SearchKnowledge( tenantID, query string, embedding []float32, li
 	scoreParts := make([]string, len(words))
 	likeParts := make([]string, len(words))
 	args := []any{tenantID, limit}
+	baseFilter := ""
 	argIdx := 3
+	if len(baseIDs) > 0 {
+		baseFilter = fmt.Sprintf(" AND k.id = ANY($%d)", argIdx)
+		args = append(args, baseIDs)
+		argIdx++
+	}
 	for i, w := range words {
 		p := fmt.Sprintf("$%d", argIdx)
 		argIdx++
@@ -639,7 +665,7 @@ func (s *Store) SearchKnowledge( tenantID, query string, embedding []float32, li
 		likeParts[i] = fmt.Sprintf("(a.title ILIKE '%%%%' || %s || '%%%%' OR a.content ILIKE '%%%%' || %s || '%%%%' OR a.category ILIKE '%%%%' || %s || '%%%%' OR a.attributes ILIKE '%%%%' || %s || '%%%%')", p, p, p, p)
 		args = append(args, w)
 	}
-	sql := fmt.Sprintf("SELECT a.id, a.title, a.content, a.category, a.attributes, k.name AS kb_name, (%s) AS score FROM knowledge_articles a JOIN knowledge_bases k ON a.knowledge_base_id = k.id WHERE k.tenant_id=$1 AND a.status='active' AND k.status='active' AND (%s) ORDER BY score DESC LIMIT $2", strings.Join(scoreParts, " + "), strings.Join(likeParts, " AND "))
+	sql := fmt.Sprintf("SELECT a.id, a.title, a.content, a.category, a.attributes, k.name AS kb_name, (%s) AS score FROM knowledge_articles a JOIN knowledge_bases k ON a.knowledge_base_id = k.id WHERE k.tenant_id=$1 AND a.status='active' AND k.status='active'%s AND (%s) ORDER BY score DESC LIMIT $2", strings.Join(scoreParts, " + "), baseFilter, strings.Join(likeParts, " AND "))
 	rows, err := s.pool.Query(context.Background(), sql, args...)
 	if err != nil { return nil, err }
 	defer rows.Close()
@@ -892,7 +918,7 @@ func (s *Store) CreateArticle( kbID, title, content, category, attributes string
 	return a, nil
 }
 
-func (s *Store) UpdateArticle( id string, title, content, category, attributes, status *string) (*model.KnowledgeArticleRow, error) {
+func (s *Store) UpdateArticle(id, kbID, tenantID string, title, content, category, attributes, status *string) (*model.KnowledgeArticleRow, error) {
 	q := `UPDATE knowledge_articles SET updated_at=NOW(), `
 	args := []any{}
 	idx := 1
@@ -901,16 +927,19 @@ func (s *Store) UpdateArticle( id string, title, content, category, attributes, 
 	if category != nil { q += fmt.Sprintf(`category=$%d, `, idx); args = append(args, *category); idx++ }
 	if attributes != nil { q += fmt.Sprintf(`attributes=$%d, `, idx); args = append(args, *attributes); idx++ }
 	if status != nil { q += fmt.Sprintf(`status=$%d, `, idx); args = append(args, *status); idx++ }
-	q = q[:len(q)-2] + fmt.Sprintf(` WHERE id=$%d RETURNING id,knowledge_base_id,title,content,category,attributes,status,to_char(created_at, 'YYYY-MM-DD HH24:MI:SS'),to_char(updated_at, 'YYYY-MM-DD HH24:MI:SS')`, idx)
-	args = append(args, id)
+	q = q[:len(q)-2] + fmt.Sprintf(` WHERE id=$%d AND knowledge_base_id=$%d AND EXISTS (SELECT 1 FROM knowledge_bases WHERE id=$%d AND tenant_id=$%d) RETURNING id,knowledge_base_id,title,content,category,attributes,status,to_char(created_at, 'YYYY-MM-DD HH24:MI:SS'),to_char(updated_at, 'YYYY-MM-DD HH24:MI:SS')`, idx, idx+1, idx+1, idx+2)
+	args = append(args, id, kbID, tenantID)
 	a := &model.KnowledgeArticleRow{}
 	err := s.pool.QueryRow(context.Background(), q, args...).Scan(&a.ID, &a.KnowledgeBaseID, &a.Title, &a.Content, &a.Category, &a.Attributes, &a.Status, &a.CreatedAt, &a.UpdatedAt)
 	if err != nil { return nil, err }
 	return a, nil
 }
 
-func (s *Store) DeleteArticle( id string) error {
-	_, err := s.pool.Exec(context.Background(), `DELETE FROM knowledge_articles WHERE id=$1`, id)
+func (s *Store) DeleteArticle(id, kbID, tenantID string) error {
+	command, err := s.pool.Exec(context.Background(), `DELETE FROM knowledge_articles a USING knowledge_bases k WHERE a.id=$1 AND a.knowledge_base_id=$2 AND k.id=a.knowledge_base_id AND k.tenant_id=$3`, id, kbID, tenantID)
+	if err == nil && command.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
 	return err
 }
 

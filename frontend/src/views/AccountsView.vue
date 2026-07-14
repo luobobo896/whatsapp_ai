@@ -1,11 +1,11 @@
 <script setup>
 import { ref, computed } from "vue";
-import { Edit, Headphones, MessageCircle, Plus, Plug, QrCode } from "lucide-vue-next";
+import { Edit, MessageCircle, Plus, Plug, QrCode } from "lucide-vue-next";
 import { formatDate } from "../utils";
 import QrLoginCard from "../components/QrLoginCard.vue";
 
 const props = defineProps({ accounts: Array, canManage: Boolean, csrfToken: String, knowledgeBases: Array });
-const emit = defineEmits(["create", "chat", "edit"]);
+const emit = defineEmits(["create", "chat", "edit", "changed"]);
 const qrAccount = ref(null);
 
 const kbMap = computed(() => {
@@ -71,7 +71,7 @@ function onAccountChanged() {
             编辑
           </el-button>
           <el-button
-            v-if="row.status !== 'connected'"
+            v-if="canManage && row.status !== 'connected'"
             size="small"
             type="primary"
             :icon="QrCode"
@@ -80,7 +80,7 @@ function onAccountChanged() {
             扫码登录
           </el-button>
           <el-button
-            v-if="row.status === 'connected'"
+            v-if="canManage && row.status === 'connected'"
             size="small"
             type="success"
             :icon="MessageCircle"
@@ -89,7 +89,7 @@ function onAccountChanged() {
             进入聊天
           </el-button>
           <el-button
-            v-if="row.status === 'connected'"
+            v-if="canManage && row.status === 'connected'"
             size="small"
             :icon="Plug"
             @click="qrAccount = row"

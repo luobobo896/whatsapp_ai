@@ -98,6 +98,34 @@ func RequireTenant() gin.HandlerFunc {
 	}
 }
 
+// RequireActiveTenant ensures the selected tenant and the user's membership
+// are both active before accessing tenant-scoped resources.
+func RequireActiveTenant() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		session := GetSession(c)
+		if session == nil || session.ActiveTenantID == "" {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "TENANT_REQUIRED", Message: "No tenant selected."}})
+			return
+		}
+		st := GetStore(c)
+		tenant, err := st.TenantByID(session.ActiveTenantID)
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": model.ErrorDetail{Code: "FORBIDDEN", Message: "Tenant is unavailable."}})
+			return
+		}
+		if tenant.Status != "active" {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": model.ErrorDetail{Code: "TENANT_SUSPENDED", Message: "Tenant is suspended."}})
+			return
+		}
+		member, err := st.TenantMember(session.ActiveTenantID, session.User.ID)
+		if err != nil || member.Status != "active" {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": model.ErrorDetail{Code: "FORBIDDEN", Message: "Membership is not active."}})
+			return
+		}
+		c.Next()
+	}
+}
+
 // RequirePlatformAdmin ensures the user is a platform admin.
 func RequirePlatformAdmin() gin.HandlerFunc {
 	return func(c *gin.Context) {

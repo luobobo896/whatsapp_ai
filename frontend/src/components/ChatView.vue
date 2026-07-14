@@ -1,11 +1,12 @@
 <script setup>
-import { ref, watch, nextTick, onUnmounted } from "vue";
+import { ref, watch, nextTick, onUnmounted, inject } from "vue";
 import { ArrowLeft, SendHorizontal } from "lucide-vue-next";
 import { get, post, messageForError } from "../api";
 import { formatDate } from "../utils";
 
 const props = defineProps({ account: Object, csrfToken: String });
 const emit = defineEmits(["back"]);
+const showToast = inject("showToast");
 
 const conversations = ref([]);
 const selectedConv = ref(null);
@@ -24,8 +25,8 @@ async function loadConversations() {
   try {
     const resp = await get(`/api/conversations?accountId=${props.account.id}`);
     conversations.value = resp.conversations || [];
-  } catch (e) {
-    /* ignore */
+  } catch (error) {
+    showToast({ tone: "error", message: messageForError(error) });
   } finally {
     loadingConvs.value = false;
   }
@@ -38,7 +39,7 @@ async function loadMessages(conv) {
     const limit = props.account.replyLimit || 30;
     const resp = await get(`/api/conversations/${conv.conversationId}/messages?limit=${limit}`);
     messages.value = (resp.messages || []).reverse();
-  } catch (e) {
+  } catch {
     messages.value = [];
   } finally {
     loadingMsgs.value = false;
@@ -64,7 +65,7 @@ async function sendReply() {
         conversationId: selectedConv.value.conversationId,
         accountId: props.account.id,
         customerName: selectedConv.value.customerName,
-        role: "agent",
+        role: "assistant",
         content: text,
         knowledgeIds: "[]",
       },
@@ -73,7 +74,7 @@ async function sendReply() {
     replyText.value = "";
     // Reload messages
     await loadMessages(selectedConv.value);
-  } catch (e) {
+  } catch {
     /* ignore */
   } finally {
     sending.value = false;

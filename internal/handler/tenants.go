@@ -1,8 +1,8 @@
 package handler
 
 import (
+	"crypto/rand"
 	"fmt"
-	"math/rand"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -15,11 +15,11 @@ import (
 
 func RegisterTenants(r *gin.RouterGroup, st *store.Store) {
 	r.GET("", handleListTenants(st))
-	r.POST("/:id/status", handleUpdateTenantStatus(st))
 }
 
 func RegisterPlatformTenants(r *gin.RouterGroup, st *store.Store) {
 	r.POST("", handleCreateTenant(st))
+	r.PATCH("/:id/status", handleUpdateTenantStatus(st))
 }
 
 func handleListTenants(st *store.Store) gin.HandlerFunc {
@@ -150,8 +150,17 @@ func handleUpdateTenantStatus(st *store.Store) gin.HandlerFunc {
 func randomPassword(n int) string {
 	const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	b := make([]byte, n)
-	for i := range b {
-		b[i] = letters[rand.Intn(len(letters))]
+	for i := 0; i < n; {
+		var randomByte [1]byte
+		if _, err := rand.Read(randomByte[:]); err != nil {
+			panic("cryptographic random source unavailable")
+		}
+		limit := byte(256 - (256 % len(letters)))
+		if randomByte[0] >= limit {
+			continue
+		}
+		b[i] = letters[int(randomByte[0])%len(letters)]
+		i++
 	}
 	return string(b)
 }

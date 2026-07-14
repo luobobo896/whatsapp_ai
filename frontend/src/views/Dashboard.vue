@@ -274,7 +274,7 @@ function navigate(v) {
           @base-updated="() => { editingKnowledgeBase = selectedKnowledgeBase; editKnowledgeOpen = true; }"
           @articles-changed="loadData()"
         />
-        <ConversationsView v-if="!loading && view === 'conversations'" :conversations="conversations" :accounts="accounts" @chat="(acct) => { chatAccount = acct; view = 'chat' }" @changed="loadData()" />
+        <ConversationsView v-if="!loading && view === 'conversations'" :conversations="conversations" :accounts="accounts" :can-manage="canManageAccounts" :csrf-token="session?.csrfToken" @chat="(acct) => { chatAccount = acct; view = 'chat' }" @changed="loadData()" />
         <ChatView
           v-if="!loading && view === 'chat' && chatAccount"
           :account="chatAccount"

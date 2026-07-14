@@ -1,10 +1,10 @@
 <script setup>
 import { ref, computed, inject } from "vue";
-import { MessagesSquare, Trash2 } from "lucide-vue-next";
+import { Trash2 } from "lucide-vue-next";
 import { del, get } from "../api";
 import { formatDate } from "../utils";
 
-const props = defineProps({ conversations: Array, accounts: Array });
+const props = defineProps({ conversations: Array, accounts: Array, canManage: Boolean, csrfToken: String });
 const emit = defineEmits(["chat", "changed"]);
 const showToast = inject("showToast");
 
@@ -27,7 +27,7 @@ async function openMessages(conv) {
   try {
     const resp = await get(`/api/conversations/${conv.conversationId}/messages`);
     messages.value = (resp.messages || []).reverse();
-  } catch (e) {
+  } catch {
     showToast({ tone: "error", message: "加载消息失败" });
   } finally {
     loadingMessages.value = false;
@@ -37,10 +37,10 @@ async function openMessages(conv) {
 async function deleteConversation(conv) {
   deletingConv.value = conv.conversationId;
   try {
-    await del(`/api/conversations/${conv.conversationId}`);
+    await del(`/api/conversations/${conv.conversationId}`, props.csrfToken);
     showToast({ tone: "success", message: "会话已删除" });
     emit("changed");
-  } catch (e) {
+  } catch {
     showToast({ tone: "error", message: "删除失败" });
   } finally {
     deletingConv.value = null;
@@ -74,7 +74,7 @@ async function deleteConversation(conv) {
       </div>
     </template>
     <el-empty v-if="!conversations.length" description="暂无会话，接入 WhatsApp 后自动显示" />
-    <el-table v-else :data="visibleConversations" stripe style="cursor:pointer">
+    <el-table v-else :data="visibleConversations" stripe style="cursor:pointer" @row-click="openMessages">
       <el-table-column prop="customerName" label="客户" min-width="120" />
       <el-table-column prop="lastMessage" label="最近消息" show-overflow-tooltip min-width="200" />
       <el-table-column label="消息数" width="80">
@@ -85,7 +85,7 @@ async function deleteConversation(conv) {
       <el-table-column label="最后活跃" width="170">
         <template #default="{ row }">{{ row.lastMessageAt ? formatDate(row.lastMessageAt) : "-" }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="90" fixed="right">
+      <el-table-column v-if="canManage" label="操作" width="90" fixed="right">
         <template #default="{ row }">
           <el-popconfirm
             title="确定删除该会话及其所有消息？"

@@ -15,11 +15,23 @@ import (
 )
 
 func RegisterConversations(r *gin.RouterGroup, st *store.Store) {
+	RegisterConversationRead(r, st)
+	RegisterConversationManagement(r, st)
+}
+
+// RegisterConversationRead registers conversation history endpoints available
+// to all active tenant members.
+func RegisterConversationRead(r *gin.RouterGroup, st *store.Store) {
 	r.GET("", handleListConversations(st))
+	r.GET("/:id/messages", handleMessages(st))
+}
+
+// RegisterConversationManagement registers conversation mutations that require
+// the accounts:manage tenant permission.
+func RegisterConversationManagement(r *gin.RouterGroup, st *store.Store) {
 	r.POST("/query", handleConversationQuery(st))
 	r.POST("/messages", handleSaveMessage(st))
 	r.POST("/reply", handleSaveReply(st))
-	r.GET("/:id/messages", handleMessages(st))
 	r.DELETE("/:id", handleDeleteConversation(st))
 }
 
@@ -35,6 +47,17 @@ func RegisterInternalConversations(r *gin.RouterGroup, st *store.Store) {
 // resolveTenantFromAccount looks up the tenant that owns the given account.
 func resolveTenantFromAccount(st *store.Store, accountID string) (string, error) {
 	return st.TenantIDByAccountID(accountID)
+}
+
+func accountKnowledgeBaseIDs(account *model.AccountRow) []string {
+	if account == nil || account.KbID == "" {
+		return nil
+	}
+	var ids []string
+	if err := json.Unmarshal([]byte(account.KbID), &ids); err != nil {
+		return nil
+	}
+	return ids
 }
 
 func handleInternalConversationQuery(st *store.Store) gin.HandlerFunc {
@@ -53,16 +76,24 @@ func handleInternalConversationQuery(st *store.Store) gin.HandlerFunc {
 			return
 		}
 
-		// 1. Save customer message
-		st.SaveMessage(tenantID, req.AccountID, req.ConversationID, req.CustomerName, "customer", req.Message, "[]")
-
-		// 2. Search knowledge
-		results, _ := st.SearchKnowledge(tenantID, req.Message, nil, req.MaxKnowledge)
-
 		// Resolve account for persona
-		acctRow, _ := st.AccountByID(tenantID, req.AccountID)
+		acctRow, err := st.AccountByID(tenantID, req.AccountID)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Invalid accountId."}})
+			return
+		}
+
+		// 1. Save customer message
+		if _, err := st.SaveMessage(tenantID, req.AccountID, req.ConversationID, req.CustomerName, "customer", req.Message, "[]"); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to save message."}})
+			return
+		}
+
+		// 2. Search only the knowledge bases bound to this account.
+		results, _ := st.SearchKnowledgeForBases(tenantID, accountKnowledgeBaseIDs(acctRow), req.Message, nil, req.MaxKnowledge)
+
 		accountName := "客服"
-		if acctRow != nil && acctRow.Name != "" {
+		if acctRow.Name != "" {
 			accountName = acctRow.Name
 		}
 
@@ -179,12 +210,20 @@ func handleConversationQuery(st *store.Store) gin.HandlerFunc {
 		}
 		if req.MaxHistory <= 0 { req.MaxHistory = 10 }
 		if req.MaxKnowledge <= 0 { req.MaxKnowledge = 5 }
+		account, err := st.AccountByID(session.ActiveTenantID, req.AccountID)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": model.ErrorDetail{Code: "NOT_FOUND", Message: "Account not found."}})
+			return
+		}
 
 		// 1. Save customer message
-		st.SaveMessage(session.ActiveTenantID, req.AccountID, req.ConversationID, req.CustomerName, "customer", req.Message, "[]")
+		if _, err := st.SaveMessage(session.ActiveTenantID, req.AccountID, req.ConversationID, req.CustomerName, "customer", req.Message, "[]"); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to save message."}})
+			return
+		}
 
 		// 2. Search knowledge
-		results, _ := st.SearchKnowledge(session.ActiveTenantID, req.Message, nil, req.MaxKnowledge)
+		results, _ := st.SearchKnowledgeForBases(session.ActiveTenantID, accountKnowledgeBaseIDs(account), req.Message, nil, req.MaxKnowledge)
 
 		// 2a. Hard gate: when knowledge is empty, force a canned fallback reply
 		// so the LLM never gets a chance to free-style outside the knowledge base.
@@ -260,8 +299,16 @@ func handleSaveMessage(st *store.Store) gin.HandlerFunc {
 			return
 		}
 		var req model.SaveMessageRequest
-		if err := c.ShouldBindJSON(&req); err != nil {
+		if err := c.ShouldBindJSON(&req); err != nil || req.ConversationID == "" || req.AccountID == "" || req.Content == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Invalid request."}})
+			return
+		}
+		if req.Role != "customer" && req.Role != "assistant" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Invalid message role."}})
+			return
+		}
+		if _, err := st.AccountByID(session.ActiveTenantID, req.AccountID); err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": model.ErrorDetail{Code: "NOT_FOUND", Message: "Account not found."}})
 			return
 		}
 		msg, err := st.SaveMessage(session.ActiveTenantID, req.AccountID, req.ConversationID, req.CustomerName, req.Role, req.Content, req.KnowledgeIDs)
@@ -283,6 +330,10 @@ func handleSaveReply(st *store.Store) gin.HandlerFunc {
 		var req model.SaveReplyRequest
 		if err := c.ShouldBindJSON(&req); err != nil || req.ConversationID == "" || req.Content == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "conversationId and content are required."}})
+			return
+		}
+		if _, err := st.AccountByID(session.ActiveTenantID, req.AccountID); err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": model.ErrorDetail{Code: "NOT_FOUND", Message: "Account not found."}})
 			return
 		}
 		if req.KnowledgeIDs == "" { req.KnowledgeIDs = "[]" }

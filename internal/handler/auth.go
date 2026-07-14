@@ -76,6 +76,11 @@ func HandleSelectTenant(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusForbidden, gin.H{"error": model.ErrorDetail{Code: "FORBIDDEN", Message: "Not a member of this tenant."}})
 			return
 		}
+		tenant, err := st.TenantByID(req.TenantID)
+		if err != nil || tenant.Status != "active" {
+			c.JSON(http.StatusForbidden, gin.H{"error": model.ErrorDetail{Code: "TENANT_SUSPENDED", Message: "Tenant is suspended."}})
+			return
+		}
 		cookie, err := c.Cookie("session_id")
 		if err != nil {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": model.ErrorDetail{Code: "AUTH_REQUIRED", Message: "No session cookie."}})

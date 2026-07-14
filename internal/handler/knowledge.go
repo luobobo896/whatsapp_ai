@@ -1,9 +1,11 @@
 package handler
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5"
 
 	"whatsapp-ai-poc/internal/middleware"
 	"whatsapp-ai-poc/internal/model"
@@ -15,15 +17,23 @@ func RegisterKnowledgeSearch(r *gin.RouterGroup, st *store.Store) {
 }
 
 func RegisterKnowledge(r *gin.RouterGroup, st *store.Store) {
-	// Base CRUD
+	RegisterKnowledgeRead(r, st)
+	RegisterKnowledgeManagement(r, st)
+}
+
+// RegisterKnowledgeRead registers endpoints available to all active tenant members.
+func RegisterKnowledgeRead(r *gin.RouterGroup, st *store.Store) {
 	r.GET("/bases", handleListBases(st))
-	r.POST("/bases", handleCreateBase(st))
 	r.GET("/bases/:id", handleGetBase(st))
+	r.GET("/bases/:id/articles", handleListArticles(st))
+}
+
+// RegisterKnowledgeManagement registers mutations that require the
+// knowledge:manage tenant permission.
+func RegisterKnowledgeManagement(r *gin.RouterGroup, st *store.Store) {
+	r.POST("/bases", handleCreateBase(st))
 	r.PATCH("/bases/:id", handleUpdateBase(st))
 	r.DELETE("/bases/:id", handleDeleteBase(st))
-
-	// Article CRUD under a base
-	r.GET("/bases/:id/articles", handleListArticles(st))
 	r.POST("/bases/:id/articles", handleCreateArticle(st))
 	r.PATCH("/bases/:id/articles/:articleId", handleUpdateArticle(st))
 	r.DELETE("/bases/:id/articles/:articleId", handleDeleteArticle(st))
@@ -95,6 +105,14 @@ func handleUpdateBase(st *store.Store) gin.HandlerFunc {
 		var req model.UpdateKnowledgeRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Invalid request."}})
+			return
+		}
+		if req.Name == nil && req.Description == nil && req.Status == nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "At least one field is required."}})
+			return
+		}
+		if req.Status != nil && *req.Status != "active" && *req.Status != "inactive" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Invalid knowledge base status."}})
 			return
 		}
 		base, err := st.UpdateKnowledgeBase(c.Param("id"), session.ActiveTenantID, req.Name, req.Description, req.Status)
@@ -186,10 +204,22 @@ func handleUpdateArticle(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Invalid request."}})
 			return
 		}
-		article, err := st.UpdateArticle(c.Param("articleId"), req.Title, req.Content, req.Category, req.Attributes, req.Status)
+		if req.Title == nil && req.Content == nil && req.Category == nil && req.Attributes == nil && req.Status == nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "At least one field is required."}})
+			return
+		}
+		if req.Status != nil && *req.Status != "active" && *req.Status != "inactive" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Invalid article status."}})
+			return
+		}
+		article, err := st.UpdateArticle(c.Param("articleId"), c.Param("id"), session.ActiveTenantID, req.Title, req.Content, req.Category, req.Attributes, req.Status)
 		if err == nil && req.Content != nil { st.ChunkArticle(article.ID, *req.Content) }
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to update article."}})
+			if errors.Is(err, pgx.ErrNoRows) {
+				c.JSON(http.StatusNotFound, gin.H{"error": model.ErrorDetail{Code: "NOT_FOUND", Message: "Article not found."}})
+			} else {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to update article."}})
+			}
 			return
 		}
 		c.JSON(http.StatusOK, article)
@@ -208,8 +238,8 @@ func handleDeleteArticle(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusNotFound, gin.H{"error": model.ErrorDetail{Code: "NOT_FOUND", Message: "Knowledge base not found."}})
 			return
 		}
-		if err := st.DeleteArticle(c.Param("articleId")); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to delete article."}})
+		if err := st.DeleteArticle(c.Param("articleId"), c.Param("id"), session.ActiveTenantID); err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": model.ErrorDetail{Code: "NOT_FOUND", Message: "Article not found."}})
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"ok": true})

@@ -1,19 +1,21 @@
 <script setup>
-import { BookOpen, Edit, Plus, Trash2 } from "lucide-vue-next";
+import { inject } from "vue";
+import { Edit, Plus, Trash2 } from "lucide-vue-next";
 import { ElMessageBox } from "element-plus";
 import { del, messageForError, patch } from "../api";
 import { formatDate } from "../utils";
 
 const props = defineProps({ bases: Array, canManage: Boolean, csrfToken: String });
 const emit = defineEmits(["create", "edit", "detail", "changed"]);
+const showToast = inject("showToast");
 
 async function toggleStatus(base) {
   const next = base.status === "active" ? "inactive" : "active";
   try {
     await patch(`/api/knowledge/bases/${base.id}`, { status: next }, props.csrfToken);
     emit("changed");
-  } catch (e) {
-    // ignore
+  } catch (error) {
+    showToast({ tone: "error", message: messageForError(error) });
   }
 }
 
@@ -26,9 +28,8 @@ async function remove(base) {
   try {
     await del(`/api/knowledge/bases/${base.id}`, props.csrfToken);
     emit("changed");
-  } catch (e) {
-    // error toast handled in dashboard
-    throw e;
+  } catch (error) {
+    showToast({ tone: "error", message: messageForError(error) });
   }
 }
 </script>

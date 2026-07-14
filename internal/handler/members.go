@@ -13,6 +13,16 @@ import (
 
 func RegisterMembers(r *gin.RouterGroup, st *store.Store) {
 	r.GET("", handleListMembers(st))
+	RegisterMemberManagement(r, st)
+}
+
+func ListMembers(st *store.Store) gin.HandlerFunc {
+	return handleListMembers(st)
+}
+
+// RegisterMemberManagement registers member mutations that require the
+// members:manage tenant permission.
+func RegisterMemberManagement(r *gin.RouterGroup, st *store.Store) {
 	r.POST("/invitations", handleInviteMember(st))
 	r.PATCH("/:userId", handleUpdateMember(st))
 }
@@ -80,8 +90,25 @@ func handleUpdateMember(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Invalid request."}})
 			return
 		}
-		if req.Role == "owner" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Cannot change role to owner."}})
+		if req.Role == "" && req.Status == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "At least one field is required."}})
+			return
+		}
+		if req.Role != "" && req.Role != "admin" && req.Role != "agent" && req.Role != "viewer" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Invalid member role."}})
+			return
+		}
+		if req.Status != "" && req.Status != "active" && req.Status != "disabled" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Invalid member status."}})
+			return
+		}
+		current, err := st.TenantMember(session.ActiveTenantID, userID)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": model.ErrorDetail{Code: "NOT_FOUND", Message: "Member not found."}})
+			return
+		}
+		if current.Role == "owner" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "The tenant owner cannot be modified."}})
 			return
 		}
 		if err := st.UpdateMember(session.ActiveTenantID, userID, req.Role, req.Status); err != nil {

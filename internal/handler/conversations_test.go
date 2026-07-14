@@ -13,6 +13,17 @@ import (
 	"whatsapp-ai-poc/internal/model"
 )
 
+func TestAccountKnowledgeBaseIDs(t *testing.T) {
+	account := &model.AccountRow{KbID: `["kb-1","kb-2"]`}
+	ids := accountKnowledgeBaseIDs(account)
+	if len(ids) != 2 || ids[0] != "kb-1" || ids[1] != "kb-2" {
+		t.Fatalf("knowledge base IDs = %#v", ids)
+	}
+	if ids := accountKnowledgeBaseIDs(&model.AccountRow{KbID: "invalid"}); ids != nil {
+		t.Fatalf("invalid knowledge base IDs = %#v, want nil", ids)
+	}
+}
+
 func init() { gin.SetMode(gin.TestMode) }
 
 func setupTestContext() (*gin.Context, *httptest.ResponseRecorder) {

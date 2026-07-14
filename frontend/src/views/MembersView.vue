@@ -1,6 +1,6 @@
 <script setup>
 import { ref, inject } from "vue";
-import { UserPlus, Users } from "lucide-vue-next";
+import { UserPlus } from "lucide-vue-next";
 import { messageForError, patch } from "../api";
 
 const ROLE_LABELS = { owner: "所有者", admin: "管理员", agent: "客服", viewer: "只读成员" };
@@ -46,7 +46,7 @@ async function updateMember(m, changes) {
       <el-table-column label="角色" width="140">
         <template #default="{ row }">
           <el-select
-            v-if="canManage"
+            v-if="canManage && row.role !== 'owner'"
             :model-value="row.role"
             size="small"
             :disabled="pendingId === row.userId"
@@ -70,6 +70,7 @@ async function updateMember(m, changes) {
       <el-table-column v-if="canManage" label="操作" width="100">
         <template #default="{ row }">
           <el-button
+            v-if="row.role !== 'owner'"
             size="small"
             :disabled="pendingId === row.userId"
             @click="updateMember(row, { status: row.status === 'active' ? 'disabled' : 'active' })"

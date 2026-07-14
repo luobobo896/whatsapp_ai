@@ -1,6 +1,6 @@
 <script setup>
 import { ref, inject } from "vue";
-import { Building2, Plus } from "lucide-vue-next";
+import { Plus } from "lucide-vue-next";
 import { messageForError, patch } from "../api";
 
 const ROLE_LABELS = { owner: "所有者", admin: "管理员", agent: "客服", viewer: "只读成员" };

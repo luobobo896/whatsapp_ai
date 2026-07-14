@@ -46,23 +46,6 @@ async function apiPost(path, body) {
   return resp.json();
 }
 
-// ---- account cache -----------------------------------------------------
-
-let cachedAccounts = null;
-
-async function getAccounts() {
-  if (cachedAccounts) return cachedAccounts;
-  try {
-    // Use the internal knowledge search endpoint with a dummy query to discover
-    // available accounts. Since the internal API needs accountId for conversations,
-    // we provide a fallback that just searches knowledge without saving.
-    cachedAccounts = []; // will be populated below
-    return cachedAccounts;
-  } catch {
-    return [];
-  }
-}
-
 // ---- MCP server --------------------------------------------------------
 
 const server = new Server(
@@ -179,31 +162,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         ],
       };
     } catch (err) {
-      // Fallback: return hardcoded account info from known state
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify(
-              [
-                {
-                  id: "2d67edae83a7c5c2f01ffac8",
-                  name: "售前客服",
-                  accountKey: "wa_4f1d7885",
-                  status: "connected",
-                },
-                {
-                  id: "b48e63266b9888f687f8cf09",
-                  name: "售后客服",
-                  accountKey: "wa_68ba1a0c",
-                  status: "pending",
-                },
-              ],
-              null,
-              2,
-            ),
+            text: `无法获取客服账号: ${err.message}`,
           },
         ],
+        isError: true,
       };
     }
   }

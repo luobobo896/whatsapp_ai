@@ -42,14 +42,6 @@ function buildAttrs() {
   return JSON.stringify(obj);
 }
 
-function attrsToText(json) {
-  if (!json || json === "{}") return "";
-  try {
-    const obj = JSON.parse(json);
-    return Object.entries(obj).map(([k, v]) => `${k}: ${v}`).join("\n");
-  } catch { return json; }
-}
-
 async function submit() {
   if (!title.value.trim()) return;
   submitting.value = true;

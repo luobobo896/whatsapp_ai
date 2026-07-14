@@ -583,6 +583,16 @@ func stopQrSession(session *qrSession) {
 
 func RegisterAccounts(r *gin.RouterGroup, st *store.Store) {
 	r.GET("", handleListAccounts(st))
+	RegisterAccountManagement(r, st)
+}
+
+func ListAccounts(st *store.Store) gin.HandlerFunc {
+	return handleListAccounts(st)
+}
+
+// RegisterAccountManagement registers account mutations that require the
+// accounts:manage tenant permission.
+func RegisterAccountManagement(r *gin.RouterGroup, st *store.Store) {
 	r.POST("", handleCreateAccount(st))
 	r.PATCH("/:id", handleUpdateAccount(st))
 	r.POST("/:id/qr-login", handleQrLogin(st))
@@ -637,6 +647,10 @@ func handleCreateAccount(st *store.Store) gin.HandlerFunc {
 		if req.ReplyLimit <= 0 {
 			req.ReplyLimit = 30
 		}
+		if !knowledgeBasesBelongToTenant(st, session.ActiveTenantID, req.KbID) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "One or more knowledge bases are unavailable."}})
+			return
+		}
 		kbIDJSON := marshalKbIDs(req.KbID)
 		account, err := st.CreateAccount(session.ActiveTenantID, req.Name, kbIDJSON, req.DailyLimit, req.ReplyLimit)
 		if err != nil {
@@ -659,8 +673,24 @@ func handleUpdateAccount(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Invalid request."}})
 			return
 		}
+		if req.Name == "" && req.Status == "" && req.KbID == nil && req.DailyLimit == nil && req.ReplyLimit == nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "At least one field is required."}})
+			return
+		}
+		if req.Status != "" && req.Status != "pending" && req.Status != "connected" && req.Status != "disabled" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Invalid account status."}})
+			return
+		}
+		if req.DailyLimit != nil && *req.DailyLimit <= 0 || req.ReplyLimit != nil && *req.ReplyLimit <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Limits must be positive."}})
+			return
+		}
 		var kbID *string
 		if req.KbID != nil {
+			if !knowledgeBasesBelongToTenant(st, session.ActiveTenantID, req.KbID) {
+				c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "One or more knowledge bases are unavailable."}})
+				return
+			}
 			s := marshalKbIDs(req.KbID)
 			kbID = &s
 		}
@@ -811,4 +841,16 @@ func marshalKbIDs(ids []string) string {
 	}
 	b, _ := json.Marshal(ids)
 	return string(b)
+}
+
+func knowledgeBasesBelongToTenant(st *store.Store, tenantID string, ids []string) bool {
+	for _, id := range ids {
+		if id == "" {
+			return false
+		}
+		if _, err := st.KnowledgeBaseByID(id, tenantID); err != nil {
+			return false
+		}
+	}
+	return true
 }

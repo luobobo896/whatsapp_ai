@@ -70,11 +70,25 @@ func run() error {
 	api := router.Group("/api", middleware.Auth(st), middleware.RequireCSRF())
 	{
 		handler.RegisterTenants(api.Group("/tenants"), st)
-		handler.RegisterAccounts(api.Group("/accounts"), st)
-		handler.RegisterKnowledge(api.Group("/knowledge"), st)
-		handler.RegisterKnowledgeSearch(api.Group("/knowledge"), st)
-		handler.RegisterConversations(api.Group("/conversations"), st)
-		handler.RegisterMembers(api.Group("/members"), st)
+		accounts := api.Group("/accounts", middleware.RequireActiveTenant())
+		accounts.GET("", handler.ListAccounts(st))
+		accounts.Use(middleware.RequireTenantPermission("accounts:manage"))
+		handler.RegisterAccountManagement(accounts, st)
+
+		knowledge := api.Group("/knowledge", middleware.RequireActiveTenant())
+		handler.RegisterKnowledgeRead(knowledge, st)
+		knowledge.Use(middleware.RequireTenantPermission("knowledge:manage"))
+		handler.RegisterKnowledgeManagement(knowledge, st)
+		handler.RegisterKnowledgeSearch(api.Group("/knowledge", middleware.RequireActiveTenant()), st)
+		conversations := api.Group("/conversations", middleware.RequireActiveTenant())
+		handler.RegisterConversationRead(conversations, st)
+		conversations.Use(middleware.RequireTenantPermission("accounts:manage"))
+		handler.RegisterConversationManagement(conversations, st)
+
+		members := api.Group("/members", middleware.RequireActiveTenant())
+		members.GET("", handler.ListMembers(st))
+		members.Use(middleware.RequireTenantPermission("members:manage"))
+		handler.RegisterMemberManagement(members, st)
 
 		// Platform admin only
 		platform := api.Group("/platform/tenants", middleware.RequirePlatformAdmin())
