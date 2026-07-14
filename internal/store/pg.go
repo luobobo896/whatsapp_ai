@@ -480,6 +480,45 @@ func (s *Store) DeleteInvitation( id string) error {
 	return err
 }
 
+// AcceptInvitationForUser atomically grants membership, creates a tenant-scoped
+// session, and consumes the invitation.
+func (s *Store) AcceptInvitationForUser(invitationID, userID string) (*model.SessionRow, string, error) {
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil { return nil, "", err }
+	defer tx.Rollback(ctx)
+
+	var tenantID, role string
+	var expiresAt time.Time
+	if err := tx.QueryRow(ctx, `SELECT tenant_id,role,expires_at FROM invitations WHERE id=$1 FOR UPDATE`, invitationID).Scan(&tenantID, &role, &expiresAt); err != nil {
+		return nil, "", err
+	}
+	if time.Now().After(expiresAt) {
+		if _, err := tx.Exec(ctx, `DELETE FROM invitations WHERE id=$1`, invitationID); err != nil { return nil, "", err }
+		if err := tx.Commit(ctx); err != nil { return nil, "", err }
+		return nil, "", pgx.ErrNoRows
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO tenant_members (tenant_id,user_id,role,status) VALUES ($1,$2,$3,'active')
+		 ON CONFLICT (tenant_id, user_id) DO UPDATE SET role=$3, status='active'`,
+		tenantID, userID, role,
+	); err != nil { return nil, "", err }
+
+	sess := &model.SessionRow{
+		ID: genToken(), UserID: userID, CSRFToken: genToken(), ActiveTenantID: tenantID,
+		ExpiresAt: time.Now().Add(24 * time.Hour).Format("2006-01-02 15:04:05"),
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO sessions (id,user_id,csrf_token,active_tenant_id,expires_at) VALUES ($1,$2,$3,$4,$5)`,
+		sess.ID, sess.UserID, sess.CSRFToken, sess.ActiveTenantID, sess.ExpiresAt,
+	); err != nil { return nil, "", err }
+	command, err := tx.Exec(ctx, `DELETE FROM invitations WHERE id=$1`, invitationID)
+	if err != nil { return nil, "", err }
+	if command.RowsAffected() == 0 { return nil, "", pgx.ErrNoRows }
+	if err := tx.Commit(ctx); err != nil { return nil, "", err }
+	return sess, tenantID, nil
+}
+
 // ---- accounts ----
 
 // AllAccounts returns all accounts across all tenants (internal use only).

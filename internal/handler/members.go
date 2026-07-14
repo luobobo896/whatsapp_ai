@@ -167,31 +167,20 @@ func handleAcceptInvitation(st *store.Store) gin.HandlerFunc {
 			return
 		}
 
-		// Add to tenant
-		if err := st.AddTenantMember(inv.TenantID, user.ID, inv.Role); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to add member."}})
-			return
-		}
-
-		// Create session
-		sess, err := st.CreateSession(user.ID)
+		sess, tenantID, err := st.AcceptInvitationForUser(inv.ID, user.ID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to create session."}})
-			return
-		}
-		if err := st.UpdateSessionTenant(sess.ID, inv.TenantID); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to select tenant."}})
-			return
-		}
-		if err := st.DeleteInvitation(inv.ID); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to complete invitation."}})
+			if errors.Is(err, pgx.ErrNoRows) {
+				c.JSON(http.StatusNotFound, gin.H{"error": model.ErrorDetail{Code: "NOT_FOUND", Message: "邀请不存在或已过期。"}})
+			} else {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to complete invitation."}})
+			}
 			return
 		}
 
 		c.SetSameSite(http.SameSiteLaxMode)
 		c.SetCookie("session_id", sess.ID, 86400, "/", "", sessionCookieSecure(), true)
 		c.JSON(http.StatusOK, model.AcceptInvitationResponse{
-			TenantID:  inv.TenantID,
+			TenantID:  tenantID,
 			CSRFToken: sess.CSRFToken,
 		})
 	}
