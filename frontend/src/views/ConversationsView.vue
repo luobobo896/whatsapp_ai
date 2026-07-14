@@ -25,7 +25,7 @@ async function openMessages(conv) {
   messagesOpen.value = true;
   loadingMessages.value = true;
   try {
-    const resp = await get(`/api/conversations/${conv.conversationId}/messages`);
+    const resp = await get(`/api/conversations/${conv.conversationId}/messages?accountId=${encodeURIComponent(conv.accountId)}`);
     messages.value = (resp.messages || []).reverse();
   } catch {
     showToast({ tone: "error", message: "加载消息失败" });
@@ -37,7 +37,7 @@ async function openMessages(conv) {
 async function deleteConversation(conv) {
   deletingConv.value = conv.conversationId;
   try {
-    await del(`/api/conversations/${conv.conversationId}`, props.csrfToken);
+    await del(`/api/conversations/${conv.conversationId}?accountId=${encodeURIComponent(conv.accountId)}`, props.csrfToken);
     showToast({ tone: "success", message: "会话已删除" });
     emit("changed");
   } catch {

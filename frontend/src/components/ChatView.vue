@@ -37,7 +37,7 @@ async function loadMessages(conv) {
   loadingMsgs.value = true;
   try {
     const limit = props.account.replyLimit || 30;
-    const resp = await get(`/api/conversations/${conv.conversationId}/messages?limit=${limit}`);
+    const resp = await get(`/api/conversations/${conv.conversationId}/messages?accountId=${encodeURIComponent(props.account.id)}&limit=${limit}`);
     messages.value = (resp.messages || []).reverse();
   } catch {
     messages.value = [];
@@ -94,7 +94,7 @@ function startPolling(conv) {
   pollTimer = setInterval(async () => {
     try {
       const limit = props.account.replyLimit || 30;
-      const resp = await get(`/api/conversations/${conv.conversationId}/messages?limit=${limit}`);
+      const resp = await get(`/api/conversations/${conv.conversationId}/messages?accountId=${encodeURIComponent(props.account.id)}&limit=${limit}`);
       const latest = (resp.messages || []).reverse();
       if (latest.length !== messages.value.length) {
         messages.value = latest;

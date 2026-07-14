@@ -927,8 +927,8 @@ func (s *Store) SaveMessageIfAbsent(tenantID, accountID, conversationID, custome
 	// Check existence first to avoid the INSERT overhead on the hot path.
 	var exists bool
 	if err := s.pool.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM conversation_messages WHERE tenant_id=$1 AND conversation_id=$2 AND role=$3 AND content=$4)",
-		tenantID, conversationID, role, content,
+		"SELECT EXISTS(SELECT 1 FROM conversation_messages WHERE tenant_id=$1 AND account_id=$2 AND conversation_id=$3 AND role=$4 AND content=$5)",
+		tenantID, accountID, conversationID, role, content,
 	).Scan(&exists); err != nil {
 		return err
 	}
@@ -943,11 +943,11 @@ func (s *Store) SaveMessageIfAbsent(tenantID, accountID, conversationID, custome
 	return err
 }
 
-func (s *Store) LoadHistory( tenantID, conversationID string, limit int) ([]model.ConversationMessage, error) {
+func (s *Store) LoadHistory( tenantID, accountID, conversationID string, limit int) ([]model.ConversationMessage, error) {
 	if limit <= 0 { limit = 20 }
 	rows, err := s.pool.Query(context.Background(),
-		"SELECT id,conversation_id,account_id,customer_name,role,content,knowledge_ids,to_char(created_at, 'YYYY-MM-DD HH24:MI:SS') FROM conversation_messages WHERE tenant_id=$1 AND conversation_id=$2 ORDER BY created_at DESC LIMIT $3",
-		tenantID, conversationID, limit)
+		"SELECT id,conversation_id,account_id,customer_name,role,content,knowledge_ids,to_char(created_at, 'YYYY-MM-DD HH24:MI:SS') FROM conversation_messages WHERE tenant_id=$1 AND account_id=$2 AND conversation_id=$3 ORDER BY created_at DESC LIMIT $4",
+		tenantID, accountID, conversationID, limit)
 	if err != nil { return nil, err }
 	defer rows.Close()
 	var list []model.ConversationMessage
@@ -963,7 +963,7 @@ func (s *Store) LoadHistory( tenantID, conversationID string, limit int) ([]mode
 }
 
 func (s *Store) ListConversationSummaries( tenantID, accountID string) ([]model.ConversationSummary, error) {
-	q := `SELECT cm.conversation_id, (SELECT customer_name FROM conversation_messages cm4 WHERE cm4.tenant_id=$1 AND cm4.conversation_id=cm.conversation_id ORDER BY created_at DESC LIMIT 1) AS customer_name, cm.account_id, (SELECT content FROM conversation_messages cm2 WHERE cm2.tenant_id=$1 AND cm2.conversation_id=cm.conversation_id ORDER BY created_at DESC LIMIT 1) AS last_message, (SELECT to_char(created_at, 'YYYY-MM-DD HH24:MI:SS') FROM conversation_messages cm3 WHERE cm3.tenant_id=$1 AND cm3.conversation_id=cm.conversation_id ORDER BY created_at DESC LIMIT 1) AS last_message_at, COUNT(*) AS message_count FROM conversation_messages cm WHERE tenant_id=$1`
+	q := `SELECT cm.conversation_id, (SELECT customer_name FROM conversation_messages cm4 WHERE cm4.tenant_id=$1 AND cm4.account_id=cm.account_id AND cm4.conversation_id=cm.conversation_id ORDER BY created_at DESC LIMIT 1) AS customer_name, cm.account_id, (SELECT content FROM conversation_messages cm2 WHERE cm2.tenant_id=$1 AND cm2.account_id=cm.account_id AND cm2.conversation_id=cm.conversation_id ORDER BY created_at DESC LIMIT 1) AS last_message, (SELECT to_char(created_at, 'YYYY-MM-DD HH24:MI:SS') FROM conversation_messages cm3 WHERE cm3.tenant_id=$1 AND cm3.account_id=cm.account_id AND cm3.conversation_id=cm.conversation_id ORDER BY created_at DESC LIMIT 1) AS last_message_at, COUNT(*) AS message_count FROM conversation_messages cm WHERE tenant_id=$1`
 	args := []any{tenantID}
 	if accountID != "" {
 		q += ` AND cm.account_id=$2`
@@ -987,10 +987,10 @@ func (s *Store) ListConversationSummaries( tenantID, accountID string) ([]model.
 	return list, rows.Err()
 }
 
-func (s *Store) DeleteConversation( tenantID, conversationID string) error {
+func (s *Store) DeleteConversation( tenantID, accountID, conversationID string) error {
 	_, err := s.pool.Exec(context.Background(),
-		"DELETE FROM conversation_messages WHERE tenant_id=$1 AND conversation_id=$2",
-		tenantID, conversationID)
+		"DELETE FROM conversation_messages WHERE tenant_id=$1 AND account_id=$2 AND conversation_id=$3",
+		tenantID, accountID, conversationID)
 	return err
 }
 

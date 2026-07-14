@@ -121,7 +121,7 @@ func handleInternalConversationQuery(st *store.Store) gin.HandlerFunc {
 				history = append(history, model.HistoryMessage{Role: m.Role, Content: m.Content})
 			}
 		} else {
-			msgs, err := st.LoadHistory(tenantID, req.ConversationID, req.MaxHistory)
+			msgs, err := st.LoadHistory(tenantID, req.AccountID, req.ConversationID, req.MaxHistory)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to load conversation history."}})
 				return
@@ -270,7 +270,7 @@ func handleConversationQuery(st *store.Store) gin.HandlerFunc {
 			}
 		} else {
 			// Fall back to local DB (reverse DESC result back to chronological order).
-			msgs, err := st.LoadHistory(session.ActiveTenantID, req.ConversationID, req.MaxHistory)
+			msgs, err := st.LoadHistory(session.ActiveTenantID, req.AccountID, req.ConversationID, req.MaxHistory)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to load conversation history."}})
 				return
@@ -395,11 +395,16 @@ func handleDeleteConversation(st *store.Store) gin.HandlerFunc {
 			return
 		}
 		conversationID := c.Param("id")
-		if conversationID == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "conversationId is required."}})
+		accountID := c.Query("accountId")
+		if conversationID == "" || accountID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "conversationId and accountId are required."}})
 			return
 		}
-		if err := st.DeleteConversation(session.ActiveTenantID, conversationID); err != nil {
+		if _, err := st.AccountByID(session.ActiveTenantID, accountID); err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": model.ErrorDetail{Code: "NOT_FOUND", Message: "Account not found."}})
+			return
+		}
+		if err := st.DeleteConversation(session.ActiveTenantID, accountID, conversationID); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to delete conversation."}})
 			return
 		}
@@ -414,19 +419,36 @@ func handleMessages(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "TENANT_REQUIRED", Message: "No tenant selected."}})
 			return
 		}
-		limit := 30
+		accountID := c.Query("accountId")
+		if accountID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "accountId is required."}})
+			return
+		}
+		account, err := st.AccountByID(session.ActiveTenantID, accountID)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": model.ErrorDetail{Code: "NOT_FOUND", Message: "Account not found."}})
+			return
+		}
+		requestedLimit := 0
 		if l := c.Query("limit"); l != "" {
 			if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
-				limit = parsed
+				requestedLimit = parsed
 			}
 		}
-		msgs, err := st.LoadHistory(session.ActiveTenantID, c.Param("id"), limit)
+		msgs, err := st.LoadHistory(session.ActiveTenantID, accountID, c.Param("id"), effectiveMessageLimit(requestedLimit, account.ReplyLimit))
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to load messages."}})
 			return
 		}
 		c.JSON(http.StatusOK, model.ConversationMessagesResponse{Messages: msgs})
 	}
+}
+
+func effectiveMessageLimit(requested, accountLimit int) int {
+	if accountLimit <= 0 { accountLimit = 30 }
+	if requested <= 0 { requested = 30 }
+	if requested > accountLimit { return accountLimit }
+	return requested
 }
 
 // buildSystemPrompt generates a persona-aware system prompt for the given account.

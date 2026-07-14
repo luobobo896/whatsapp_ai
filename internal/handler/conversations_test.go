@@ -24,6 +24,27 @@ func TestAccountKnowledgeBaseIDs(t *testing.T) {
 	}
 }
 
+func TestEffectiveMessageLimit(t *testing.T) {
+	tests := []struct {
+		name      string
+		requested int
+		account   int
+		want      int
+	}{
+		{name: "default request", requested: 0, account: 30, want: 30},
+		{name: "request below account maximum", requested: 10, account: 30, want: 10},
+		{name: "request capped by account maximum", requested: 100, account: 30, want: 30},
+		{name: "invalid account maximum uses default", requested: 100, account: 0, want: 30},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := effectiveMessageLimit(tt.requested, tt.account); got != tt.want {
+				t.Fatalf("effectiveMessageLimit(%d, %d) = %d, want %d", tt.requested, tt.account, got, tt.want)
+			}
+		})
+	}
+}
+
 func init() { gin.SetMode(gin.TestMode) }
 
 func setupTestContext() (*gin.Context, *httptest.ResponseRecorder) {
