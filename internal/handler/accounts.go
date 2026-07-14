@@ -6,6 +6,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5"
 
 	"whatsapp-ai-poc/internal/middleware"
 	"whatsapp-ai-poc/internal/model"
@@ -686,7 +688,12 @@ func handleCreateAccount(st *store.Store) gin.HandlerFunc {
 		if req.ReplyLimit <= 0 {
 			req.ReplyLimit = 30
 		}
-		if !knowledgeBasesBelongToTenant(st, session.ActiveTenantID, req.KbID) {
+		knowledgeBasesValid, err := knowledgeBasesBelongToTenant(st, session.ActiveTenantID, req.KbID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to verify knowledge bases."}})
+			return
+		}
+		if !knowledgeBasesValid {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "One or more knowledge bases are unavailable."}})
 			return
 		}
@@ -726,7 +733,12 @@ func handleUpdateAccount(st *store.Store) gin.HandlerFunc {
 		}
 		var kbID *string
 		if req.KbID != nil {
-			if !knowledgeBasesBelongToTenant(st, session.ActiveTenantID, req.KbID) {
+			knowledgeBasesValid, err := knowledgeBasesBelongToTenant(st, session.ActiveTenantID, req.KbID)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to verify knowledge bases."}})
+				return
+			}
+			if !knowledgeBasesValid {
 				c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "One or more knowledge bases are unavailable."}})
 				return
 			}
@@ -898,14 +910,17 @@ func marshalKbIDs(ids []string) string {
 	return string(b)
 }
 
-func knowledgeBasesBelongToTenant(st *store.Store, tenantID string, ids []string) bool {
+func knowledgeBasesBelongToTenant(st *store.Store, tenantID string, ids []string) (bool, error) {
 	for _, id := range ids {
 		if id == "" {
-			return false
+			return false, nil
 		}
 		if _, err := st.KnowledgeBaseByID(id, tenantID); err != nil {
-			return false
+			if errors.Is(err, pgx.ErrNoRows) {
+				return false, nil
+			}
+			return false, err
 		}
 	}
-	return true
+	return true, nil
 }

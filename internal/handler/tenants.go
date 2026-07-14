@@ -38,7 +38,11 @@ func handleListTenants(st *store.Store) gin.HandlerFunc {
 			}
 			// Platform admin sees all tenants without membership info
 			// But also needs to see their own memberships
-			userTenants, _ := st.TenantsForUser(session.User.ID)
+			userTenants, err := st.TenantsForUser(session.User.ID)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to load tenant memberships."}})
+				return
+			}
 			userTenantMap := make(map[string]model.TenantWithMembership)
 			for _, t := range userTenants {
 				userTenantMap[t.ID] = t

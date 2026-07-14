@@ -44,7 +44,10 @@ func HandleLogout(st *store.Store) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		cookie, err := c.Cookie("session_id")
 		if err == nil {
-			st.DeleteSession(cookie)
+			if err := st.DeleteSession(cookie); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to end session."}})
+				return
+			}
 		}
 		c.SetSameSite(http.SameSiteLaxMode)
 		c.SetCookie("session_id", "", -1, "/", "", sessionCookieSecure(), true)
