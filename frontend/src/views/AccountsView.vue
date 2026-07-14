@@ -1,12 +1,18 @@
 <script setup>
-import { ref } from "vue";
-import { Headphones, MessageCircle, Plus, Plug, QrCode } from "lucide-vue-next";
+import { ref, computed } from "vue";
+import { Edit, Headphones, MessageCircle, Plus, Plug, QrCode } from "lucide-vue-next";
 import { formatDate } from "../utils";
 import QrLoginCard from "../components/QrLoginCard.vue";
 
-const props = defineProps({ accounts: Array, canManage: Boolean, csrfToken: String });
-const emit = defineEmits(["create", "chat"]);
+const props = defineProps({ accounts: Array, canManage: Boolean, csrfToken: String, knowledgeBases: Array });
+const emit = defineEmits(["create", "chat", "edit"]);
 const qrAccount = ref(null);
+
+const kbMap = computed(() => {
+  const map = {};
+  (props.knowledgeBases || []).forEach((kb) => { map[kb.id] = kb.name; });
+  return map;
+});
 
 function onAccountChanged() {
   qrAccount.value = null;
@@ -38,14 +44,32 @@ function onAccountChanged() {
           </el-tag>
         </template>
       </el-table-column>
+      <el-table-column label="绑定知识库">
+        <template #default="{ row }">
+          <template v-if="row.kbId && row.kbId.length">
+            <el-tag v-for="id in row.kbId" :key="id" size="small" type="success" style="margin-right:4px;margin-bottom:2px">
+              {{ kbMap[id] || id.slice(0, 8) }}
+            </el-tag>
+          </template>
+          <span v-else style="color:#c0c4cc">未绑定</span>
+        </template>
+      </el-table-column>
       <el-table-column prop="dailyLimit" label="每日上限">
         <template #default="{ row }">{{ row.dailyLimit || "不限" }}</template>
       </el-table-column>
       <el-table-column label="创建时间">
         <template #default="{ row }">{{ formatDate(row.createdAt) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="220">
+      <el-table-column label="操作" width="260">
         <template #default="{ row }">
+          <el-button
+            v-if="canManage"
+            size="small"
+            :icon="Edit"
+            @click="emit('edit', row)"
+          >
+            编辑
+          </el-button>
           <el-button
             v-if="row.status !== 'connected'"
             size="small"

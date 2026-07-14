@@ -3,6 +3,7 @@ package handler
 import (
 	"bufio"
 	"bytes"
+	"context"
 	_ "embed"
 	"encoding/json"
 	"fmt"
@@ -27,20 +28,43 @@ var qrBridgePathOnce sync.Once
 var qrBridgePath string
 var qrBridgePathErr error
 
-const qrBridgeTimeout = 25 * time.Second
+var (
+	openClawAvailable   bool
+	openClawAvailableMu sync.Mutex
+	openClawChecked     bool
+)
+
+var (
+	channelStatusCache   map[string]channelConnectionStatus
+	channelStatusCacheAt time.Time
+	channelStatusCacheMu sync.Mutex
+)
+
+const (
+	qrBridgeTimeout        = 25 * time.Second
+	qrCodeTTL              = 45 * time.Second
+	qrConnectionTimeout    = time.Minute
+	qrSessionCleanupWait   = time.Minute
+	openClawRestartWait    = 30 * time.Second
+	openClawPollInterval   = time.Second
+	channelStatusCacheTTL  = 5 * time.Second
+)
 
 //go:embed whatsapp_qr_bridge.mjs
 var whatsappQrBridgeScript []byte
 
 type qrSession struct {
-	QrData    string
-	ExpiresAt time.Time
-	AccountID string
-	Cmd       *exec.Cmd
-	Status    string
-	Err       error
-	Events    <-chan qrBridgeEvent
-	Stderr    *bytes.Buffer
+	QrData             string
+	ExpiresAt          time.Time
+	ConnectionDeadline time.Time
+	CleanupAt          time.Time
+	AccountID          string
+	AccountKey         string
+	Cmd                *exec.Cmd
+	Status             string
+	Err                error
+	Events             <-chan qrBridgeEvent
+	Stderr             *bytes.Buffer
 }
 
 type qrBridgeEvent struct {
@@ -49,6 +73,65 @@ type qrBridgeEvent struct {
 	Connected bool   `json:"connected,omitempty"`
 	Message   string `json:"message,omitempty"`
 	Error     string `json:"error,omitempty"`
+}
+
+type channelConnectionStatus struct {
+	Known     bool
+	Linked    bool
+	Running   bool
+	Connected bool
+}
+
+type openClawChannelStatusPayload struct {
+	Channels map[string]struct {
+		Linked    bool `json:"linked"`
+		Running   bool `json:"running"`
+		Connected bool `json:"connected"`
+	} `json:"channels"`
+	ChannelAccounts map[string][]struct {
+		AccountID string `json:"accountId"`
+		Linked    bool   `json:"linked"`
+		Running   bool   `json:"running"`
+		Connected bool   `json:"connected"`
+	} `json:"channelAccounts"`
+}
+
+func updateQrSessionStatus(session *qrSession, channel channelConnectionStatus, now time.Time) string {
+	if session == nil {
+		return ""
+	}
+	if session.Status == "connected" || channel.Known && channel.Running && channel.Connected {
+		session.Status = "connected"
+		if session.CleanupAt.Before(now) {
+			session.CleanupAt = now.Add(qrSessionCleanupWait)
+		}
+		return session.Status
+	}
+	if session.Status == "connecting" {
+		if session.ConnectionDeadline.IsZero() {
+			session.ConnectionDeadline = now.Add(qrConnectionTimeout)
+			session.CleanupAt = session.ConnectionDeadline
+		}
+		if !now.Before(session.ConnectionDeadline) {
+			session.Status = "expired"
+		}
+		return session.Status
+	}
+	if channel.Known && channel.Linked {
+		session.Status = "connecting"
+		session.ConnectionDeadline = now.Add(qrConnectionTimeout)
+		session.CleanupAt = session.ConnectionDeadline
+		return session.Status
+	}
+	if session.Status == "starting" {
+		return session.Status
+	}
+	if now.Before(session.ExpiresAt) {
+		session.Status = "qr_pending"
+		return session.Status
+	}
+	session.Status = "expired"
+	return session.Status
 }
 
 func init() {
@@ -61,7 +144,7 @@ func init() {
 				if v.Status == "starting" {
 					continue
 				}
-				if now.After(v.ExpiresAt) {
+				if !v.CleanupAt.IsZero() && !now.Before(v.CleanupAt) {
 					stopQrSession(v)
 					delete(qrCache, k)
 				}
@@ -72,8 +155,63 @@ func init() {
 }
 
 func isOpenClawAvailable() bool {
-	_, err := exec.LookPath("openclaw")
-	return err == nil
+	openClawAvailableMu.Lock()
+	defer openClawAvailableMu.Unlock()
+	if !openClawChecked {
+		_, err := exec.LookPath("openclaw")
+		openClawAvailable = err == nil
+		openClawChecked = true
+	}
+	return openClawAvailable
+}
+
+func openClawConfigPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".openclaw", "openclaw.json"), nil
+}
+
+// ensureOpenClawAccount adds the account to OpenClaw's config so the gateway
+// monitors its auth directory. Safe to call multiple times (idempotent).
+func ensureOpenClawAccount(accountKey string) error {
+	cfgPath, err := openClawConfigPath()
+	if err != nil {
+		return err
+	}
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return err
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return err
+	}
+
+	channels, _ := cfg["channels"].(map[string]any)
+	if channels == nil {
+		return nil
+	}
+	wa, _ := channels["whatsapp"].(map[string]any)
+	if wa == nil {
+		return nil
+	}
+	accounts, _ := wa["accounts"].(map[string]any)
+	if accounts == nil {
+		accounts = map[string]any{}
+		wa["accounts"] = accounts
+	}
+	if _, exists := accounts[accountKey]; exists {
+		return nil // already registered
+	}
+	accounts[accountKey] = map[string]any{"enabled": true}
+
+	updated, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(cfgPath, updated, 0o600)
 }
 
 func parseQrBridgeEvent(line []byte) (qrBridgeEvent, error) {
@@ -82,6 +220,161 @@ func parseQrBridgeEvent(line []byte) (qrBridgeEvent, error) {
 		return qrBridgeEvent{}, err
 	}
 	return event, nil
+}
+
+func readWhatsAppChannelStatus(accountKey string) channelConnectionStatus {
+	out, err := exec.Command("openclaw", "channels", "status", "--channel", "whatsapp", "--account", accountKey, "--json").Output()
+	if err != nil {
+		return channelConnectionStatus{}
+	}
+	return parseWhatsAppChannelStatus(out, accountKey)
+}
+
+func readAllWhatsAppChannelStatuses() map[string]channelConnectionStatus {
+	channelStatusCacheMu.Lock()
+	if time.Since(channelStatusCacheAt) < channelStatusCacheTTL && channelStatusCache != nil {
+		cached := channelStatusCache
+		channelStatusCacheMu.Unlock()
+		return cached
+	}
+	channelStatusCacheMu.Unlock()
+
+	out, err := exec.Command("openclaw", "channels", "status", "--channel", "whatsapp", "--json").Output()
+	if err != nil {
+		return nil
+	}
+	statuses := parseAllWhatsAppChannelStatuses(out)
+
+	channelStatusCacheMu.Lock()
+	channelStatusCache = statuses
+	channelStatusCacheAt = time.Now()
+	channelStatusCacheMu.Unlock()
+
+	return statuses
+}
+
+func parseOpenClawChannelStatusPayload(data []byte) (openClawChannelStatusPayload, error) {
+	var payload openClawChannelStatusPayload
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return openClawChannelStatusPayload{}, err
+	}
+	return payload, nil
+}
+
+func parseAllWhatsAppChannelStatuses(data []byte) map[string]channelConnectionStatus {
+	payload, err := parseOpenClawChannelStatusPayload(data)
+	if err != nil {
+		return nil
+	}
+	statuses := make(map[string]channelConnectionStatus, len(payload.ChannelAccounts["whatsapp"]))
+	for _, account := range payload.ChannelAccounts["whatsapp"] {
+		statuses[account.AccountID] = channelConnectionStatus{
+			Known:     true,
+			Linked:    account.Linked,
+			Running:   account.Running,
+			Connected: account.Connected,
+		}
+	}
+	return statuses
+}
+
+func parseWhatsAppChannelStatus(data []byte, accountKey string) channelConnectionStatus {
+	payload, err := parseOpenClawChannelStatusPayload(data)
+	if err != nil {
+		return channelConnectionStatus{}
+	}
+	for _, account := range payload.ChannelAccounts["whatsapp"] {
+		if account.AccountID == accountKey {
+			return channelConnectionStatus{
+				Known:     true,
+				Linked:    account.Linked,
+				Running:   account.Running,
+				Connected: account.Connected,
+			}
+		}
+	}
+	whatsapp, ok := payload.Channels["whatsapp"]
+	if !ok {
+		return channelConnectionStatus{}
+	}
+	return channelConnectionStatus{
+		Known:     true,
+		Linked:    whatsapp.Linked,
+		Running:   whatsapp.Running,
+		Connected: whatsapp.Connected,
+	}
+}
+
+func restartOpenClawGateway() error {
+	ctx, cancel := context.WithTimeout(context.Background(), openClawRestartWait)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "openclaw", "gateway", "restart").CombinedOutput()
+	if err != nil {
+		message := strings.TrimSpace(string(output))
+		if message == "" {
+			message = err.Error()
+		}
+		return fmt.Errorf("重启 OpenClaw gateway 失败: %s", message)
+	}
+	return nil
+}
+
+func restartAndWaitForOpenClawAccount(
+	accountKey string,
+	restart func() error,
+	readStatus func(string) channelConnectionStatus,
+	wait func(),
+	attempts int,
+) error {
+	if err := restart(); err != nil {
+		return err
+	}
+	for attempt := 0; attempt < attempts; attempt++ {
+		status := readStatus(accountKey)
+		if status.Known && status.Running && status.Connected {
+			return nil
+		}
+		if attempt+1 < attempts {
+			wait()
+		}
+	}
+	return fmt.Errorf("OpenClaw gateway 重启后账号 %s 未连接", accountKey)
+}
+
+func activateOpenClawAccount(accountKey string) error {
+	if err := ensureOpenClawAccount(accountKey); err != nil {
+		return err
+	}
+	attempts := int(openClawRestartWait / openClawPollInterval)
+	return restartAndWaitForOpenClawAccount(
+		accountKey,
+		restartOpenClawGateway,
+		readWhatsAppChannelStatus,
+		func() { time.Sleep(openClawPollInterval) },
+		attempts,
+	)
+}
+
+func applyLiveAccountStatuses(accounts []model.Account, statuses map[string]channelConnectionStatus) []model.Account {
+	changed := make([]model.Account, 0)
+	for i := range accounts {
+		if accounts[i].Status == "disabled" {
+			continue
+		}
+		live, ok := statuses[accounts[i].AccountKey]
+		if !ok || !live.Known {
+			continue
+		}
+		status := "pending"
+		if live.Running && live.Connected {
+			status = "connected"
+		}
+		if accounts[i].Status != status {
+			accounts[i].Status = status
+			changed = append(changed, accounts[i])
+		}
+	}
+	return changed
 }
 
 func resolveWhatsAppLoginModule() (string, error) {
@@ -214,19 +507,23 @@ func startQrSession(accountID, accountKey string) (*qrSession, error) {
 		return nil, fmt.Errorf("OpenClaw 未返回 PNG 二维码")
 	}
 
+	now := time.Now()
 	session := &qrSession{
-		QrData:    first.QrDataURL,
-		ExpiresAt: time.Now().Add(30 * time.Second),
-		AccountID: accountID,
-		Cmd:       cmd,
-		Status:    "qr_pending",
-		Events:    events,
-		Stderr:    &stderr,
+		QrData:     first.QrDataURL,
+		ExpiresAt:  now.Add(qrCodeTTL),
+		CleanupAt:  now.Add(qrCodeTTL + qrSessionCleanupWait),
+		AccountID:  accountID,
+		AccountKey: accountKey,
+		Cmd:        cmd,
+		Status:     "qr_pending",
+		Events:     events,
+		Stderr:     &stderr,
 	}
 	return session, nil
 }
 
 func monitorQrSession(session *qrSession, events <-chan qrBridgeEvent, stderr *bytes.Buffer) {
+	bridgeConnected := false
 	for event := range events {
 		qrCacheMu.Lock()
 		current, ok := qrCache[session.AccountID]
@@ -234,21 +531,37 @@ func monitorQrSession(session *qrSession, events <-chan qrBridgeEvent, stderr *b
 			switch {
 			case event.Type == "qr" && strings.HasPrefix(event.QrDataURL, "data:image/png;base64,"):
 				session.QrData = event.QrDataURL
-				session.ExpiresAt = time.Now().Add(30 * time.Second)
+				session.ExpiresAt = time.Now().Add(qrCodeTTL)
 			case event.Type == "status" && event.Connected:
-				session.Status = "connected"
+				bridgeConnected = true
+				updateQrSessionStatus(session, channelConnectionStatus{Known: true, Linked: true}, time.Now())
 			case event.Type == "error":
 				session.Err = fmt.Errorf("%s", event.Error)
 			}
 		}
 		qrCacheMu.Unlock()
 	}
-	if err := session.Cmd.Wait(); err != nil {
+	waitErr := session.Cmd.Wait()
+	if bridgeConnected && waitErr == nil {
+		activationErr := activateOpenClawAccount(session.AccountKey)
+		qrCacheMu.Lock()
+		if current, ok := qrCache[session.AccountID]; ok && current == session {
+			if activationErr != nil {
+				session.Err = activationErr
+				session.Status = "expired"
+			} else {
+				updateQrSessionStatus(session, channelConnectionStatus{Known: true, Linked: true, Running: true, Connected: true}, time.Now())
+			}
+		}
+		qrCacheMu.Unlock()
+		return
+	}
+	if waitErr != nil {
 		qrCacheMu.Lock()
 		if current, ok := qrCache[session.AccountID]; ok && current == session && session.Status != "connected" && session.Err == nil {
 			message := strings.TrimSpace(stderr.String())
 			if message == "" {
-				message = err.Error()
+				message = waitErr.Error()
 			}
 			session.Err = fmt.Errorf("%s", message)
 		}
@@ -292,6 +605,16 @@ func handleListAccounts(st *store.Store) gin.HandlerFunc {
 		if accounts == nil {
 			accounts = []model.Account{}
 		}
+		if isOpenClawAvailable() {
+			// Sync live status in background — shelling out to openclaw is slow.
+			tenantID := session.ActiveTenantID
+			go func() {
+				statuses := readAllWhatsAppChannelStatuses()
+				for _, account := range applyLiveAccountStatuses(accounts, statuses) {
+					_, _ = st.UpdateAccount(tenantID, account.ID, "", account.Status, nil, nil, nil)
+				}
+			}()
+		}
 		c.JSON(http.StatusOK, model.AccountsResponse{Accounts: accounts})
 	}
 }
@@ -314,7 +637,8 @@ func handleCreateAccount(st *store.Store) gin.HandlerFunc {
 		if req.ReplyLimit <= 0 {
 			req.ReplyLimit = 30
 		}
-		account, err := st.CreateAccount(session.ActiveTenantID, req.Name, req.KbID, req.DailyLimit, req.ReplyLimit)
+		kbIDJSON := marshalKbIDs(req.KbID)
+		account, err := st.CreateAccount(session.ActiveTenantID, req.Name, kbIDJSON, req.DailyLimit, req.ReplyLimit)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to create account."}})
 			return
@@ -335,7 +659,12 @@ func handleUpdateAccount(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Invalid request."}})
 			return
 		}
-		account, err := st.UpdateAccount(session.ActiveTenantID, c.Param("id"), req.Name, req.KbID, req.Status, req.DailyLimit, req.ReplyLimit)
+		var kbID *string
+		if req.KbID != nil {
+			s := marshalKbIDs(req.KbID)
+			kbID = &s
+		}
+		account, err := st.UpdateAccount(session.ActiveTenantID, c.Param("id"), req.Name, req.Status, kbID, req.DailyLimit, req.ReplyLimit)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to update account."}})
 			return
@@ -368,6 +697,9 @@ func handleQrLogin(st *store.Store) gin.HandlerFunc {
 		qrCache[accountID] = &qrSession{AccountID: accountID, Status: "starting"}
 		qrCacheMu.Unlock()
 		stopQrSession(previous)
+		if acct.AccountKey != "" {
+			_ = ensureOpenClawAccount(acct.AccountKey)
+		}
 
 		qr, err := startQrSession(accountID, acct.AccountKey)
 		qrCacheMu.Lock()
@@ -404,54 +736,43 @@ func handleQrStatus(st *store.Store) gin.HandlerFunc {
 		}
 
 		resp := model.AccountStatusResponse{Status: acct.Status}
+		channel := channelConnectionStatus{}
+		if isOpenClawAvailable() {
+			channel = readWhatsAppChannelStatus(acct.AccountKey)
+		}
+
+		now := time.Now()
 		qrCacheMu.Lock()
 		qr := qrCache[accountID]
 		if qr != nil {
-			switch {
-			case qr.Status == "starting":
-				// still waiting for startQrSession to complete
-			case qr.Status == "connected":
+			switch updateQrSessionStatus(qr, channel, now) {
+			case "connected":
 				resp.Status = "connected"
-				resp.ConnectedAt = time.Now().Format("2006-01-02 15:04:05")
+				resp.ConnectedAt = now.Format("2006-01-02 15:04:05")
 				delete(qrCache, accountID)
-			case time.Now().Before(qr.ExpiresAt):
+			case "connecting":
+				resp.Status = "connecting"
+				resp.ExpiresAt = qr.ConnectionDeadline.Format(time.RFC3339)
+			case "qr_pending":
 				resp.Status = "qr_pending"
 				resp.QrData = qr.QrData
 				resp.ExpiresAt = qr.ExpiresAt.Format(time.RFC3339)
-			default:
+			case "expired":
+				resp.Status = "expired"
 				stopQrSession(qr)
 				delete(qrCache, accountID)
 			}
+		} else if channel.Known && channel.Connected {
+			resp.Status = "connected"
+			resp.ConnectedAt = now.Format("2006-01-02 15:04:05")
 		}
 		qrCacheMu.Unlock()
 
 		if resp.Status == "connected" {
-			st.UpdateAccount(session.ActiveTenantID, accountID, "", "", "connected", nil, nil)
-			c.JSON(http.StatusOK, resp)
-			return
-		}
-
-		if isOpenClawAvailable() {
-			out, err := exec.Command("openclaw", "channels", "status", "--channel", "whatsapp", "--account", acct.AccountKey, "--json").Output()
-			if err == nil {
-				var sr struct {
-					Channels map[string]struct {
-						Linked    bool `json:"linked"`
-						Connected bool `json:"connected"`
-					} `json:"channels"`
-				}
-				if json.Unmarshal(out, &sr) == nil {
-					if ch, ok := sr.Channels["whatsapp"]; ok && ch.Linked {
-						resp.Status = "connected"
-						resp.ConnectedAt = time.Now().Format("2006-01-02 15:04:05")
-						st.UpdateAccount(session.ActiveTenantID, accountID, "", "", "connected", nil, nil)
-						qrCacheMu.Lock()
-						stopQrSession(qrCache[accountID])
-						delete(qrCache, accountID)
-						qrCacheMu.Unlock()
-					}
-				}
+			if acct.AccountKey != "" {
+				_ = ensureOpenClawAccount(acct.AccountKey)
 			}
+			st.UpdateAccount(session.ActiveTenantID, accountID, "", "connected", nil, nil, nil)
 		}
 
 		c.JSON(http.StatusOK, resp)
@@ -479,7 +800,15 @@ func handleDisconnect(st *store.Store) gin.HandlerFunc {
 		delete(qrCache, accountID)
 		qrCacheMu.Unlock()
 
-		st.UpdateAccount(session.ActiveTenantID, accountID, "", "", "pending", nil, nil)
+		st.UpdateAccount(session.ActiveTenantID, accountID, "", "pending", nil, nil, nil)
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	}
+}
+
+func marshalKbIDs(ids []string) string {
+	if len(ids) == 0 {
+		return "[]"
+	}
+	b, _ := json.Marshal(ids)
+	return string(b)
 }

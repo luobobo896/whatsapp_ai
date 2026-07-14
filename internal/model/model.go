@@ -16,10 +16,10 @@ type CreateTenantRequest struct {
 }
 
 type CreateAccountRequest struct {
-	Name       string `json:"name"`
-	DailyLimit int    `json:"dailyLimit"`
-	KbID       string `json:"kbId"`
-	ReplyLimit int    `json:"replyLimit"`
+	Name       string   `json:"name"`
+	DailyLimit int      `json:"dailyLimit"`
+	KbID       []string `json:"kbId"`
+	ReplyLimit int      `json:"replyLimit"`
 }
 
 type CreateKnowledgeRequest struct {
@@ -49,11 +49,11 @@ type UpdateTenantStatusRequest struct {
 }
 
 type UpdateAccountRequest struct {
-	Name       string `json:"name,omitempty"`
-	KbID       string `json:"kbId,omitempty"`
-	Status     string `json:"status,omitempty"`
-	DailyLimit *int   `json:"dailyLimit,omitempty"`
-	ReplyLimit *int   `json:"replyLimit,omitempty"`
+	Name       string   `json:"name,omitempty"`
+	KbID       []string `json:"kbId,omitempty"`
+	Status     string   `json:"status,omitempty"`
+	DailyLimit *int     `json:"dailyLimit,omitempty"`
+	ReplyLimit *int     `json:"replyLimit,omitempty"`
 }
 
 // -- OpenClaw QR login --
@@ -156,14 +156,14 @@ type InviteResponse struct {
 // -- account --
 
 type Account struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	AccountKey string `json:"accountKey"`
-	Status     string `json:"status"`
-	DailyLimit int    `json:"dailyLimit"`
-	KbID       string `json:"kbId"`
-	ReplyLimit int    `json:"replyLimit"`
-	CreatedAt  string `json:"createdAt"`
+	ID         string   `json:"id"`
+	Name       string   `json:"name"`
+	AccountKey string   `json:"accountKey"`
+	Status     string   `json:"status"`
+	DailyLimit int      `json:"dailyLimit"`
+	KbID       []string `json:"kbId"`
+	ReplyLimit int      `json:"replyLimit"`
+	CreatedAt  string   `json:"createdAt"`
 }
 
 type AccountsResponse struct {
@@ -271,15 +271,36 @@ type SaveMessageRequest struct {
 	KnowledgeIDs   string `json:"knowledgeIds"`
 }
 
+// -- save reply --
+
+type SaveReplyRequest struct {
+	ConversationID string `json:"conversationId"`
+	AccountID      string `json:"accountId"`
+	CustomerName   string `json:"customerName"`
+	Content        string `json:"content"`
+	KnowledgeIDs   string `json:"knowledgeIds"`
+}
+
 // -- RAG query --
 
 type ConversationQueryRequest struct {
-	ConversationID string `json:"conversationId"`
-	CustomerName   string `json:"customerName"`
-	Message        string `json:"message"`
-	AccountID      string `json:"accountId"`
-	MaxHistory     int    `json:"maxHistory"`
-	MaxKnowledge   int    `json:"maxKnowledge"`
+	ConversationID string           `json:"conversationId"`
+	CustomerName   string           `json:"customerName"`
+	Message        string           `json:"message"`
+	AccountID      string           `json:"accountId"`
+	MaxHistory     int              `json:"maxHistory"`
+	MaxKnowledge   int              `json:"maxKnowledge"`
+	// History provided by OpenClaw (its own stored messages, chronological order).
+	// When present, used directly as context and persisted locally for traceability.
+	// When absent, history is loaded from the local database.
+	History        []OpenClawMessage `json:"history,omitempty"`
+}
+
+// OpenClawMessage is a single message entry sent by OpenClaw in the history field.
+type OpenClawMessage struct {
+	Role      string `json:"role"`    // "user" or "assistant"
+	Content   string `json:"content"`
+	Timestamp string `json:"timestamp,omitempty"` // ISO-8601, optional
 }
 
 type ConversationQueryResponse struct {
@@ -287,6 +308,10 @@ type ConversationQueryResponse struct {
 	Knowledge    []SearchResultItem `json:"knowledge"`
 	History      []HistoryMessage   `json:"history"`
 	ReplyTo      string             `json:"replyTo"`
+	// DirectReply is set when the backend provides a canned fallback response
+	// (e.g. when knowledge search returns empty). When non-empty, the caller
+	// should skip the LLM and send this text directly to the user.
+	DirectReply string `json:"directReply,omitempty"`
 }
 
 type HistoryMessage struct {
@@ -299,6 +324,7 @@ type HistoryMessage struct {
 type ConversationSummary struct {
 	ConversationID string `json:"conversationId"`
 	CustomerName   string `json:"customerName"`
+	AccountID      string `json:"accountId"`
 	LastMessage    string `json:"lastMessage"`
 	LastMessageAt  string `json:"lastMessageAt"`
 	MessageCount   int    `json:"messageCount"`

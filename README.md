@@ -107,6 +107,46 @@ go build ./cmd/server
 - CSRF 保护：写操作需 `X-CSRF-Token` 请求头
 - Guardrails：system prompt 禁止 AI 超范围回答
 
+## OpenClaw WhatsApp 接入
+
+WhatsApp 消息收发由 OpenClaw 网关代理，管理端负责触发扫码登录并控制新联系人的授权策略。
+
+### 扫码登录流程
+
+1. 前端点击「扫码登录」→ `POST /api/accounts/:id/qr-login`（`internal/handler/accounts.go` `handleQrLogin`）。
+2. 后端检查本机是否安装 `openclaw`（`isOpenClawAvailable`），先把客服账号幂等注册到 OpenClaw 配置，再定位 WhatsApp 登录模块（`resolveWhatsAppLoginModule`，可用环境变量 `OPENCLAW_WHATSAPP_LOGIN_MODULE` 覆盖路径），启动内嵌的 Node 桥接脚本 `whatsapp_qr_bridge.mjs` 生成二维码 PNG（`startQrSession`）。
+3. 前端展示二维码并显示 30 秒倒计时，同时轮询 `GET /api/accounts/:id/qr-status`。
+4. 手机扫码后，`qr-status` 从 OpenClaw 的目标 `channelAccounts` 项检测到 `linked=true, connected=false`，返回 `connecting`。前端立即隐藏二维码和倒计时，但继续每 3 秒查询连接状态，最多等待 1 分钟。
+5. 桥接脚本完成登录并退出后，后端重启 OpenClaw gateway，等待目标账号同时达到 `running=true`、`connected=true`，再将数据库账号状态更新为 `connected`；1 分钟内仍未连接则结束等待并提示重新获取二维码。二维码在扫码前仍保持 30 秒有效期。
+6. 账号列表加载时会读取 OpenClaw 的账号级实时状态并校正数据库缓存，避免凭据仍存在但 provider 已离线时继续显示“已连接”。
+
+扫码登录只解决「账号本身接入 OpenClaw」的问题；账号接入后，新联系人首次发消息是否需要人工审核，由下面的授权策略决定。
+
+### 授权策略（dmPolicy）
+
+是否需要人工审核新联系人由 `~/.openclaw/openclaw.json` 中 `channels.whatsapp.dmPolicy` 控制：
+
+| 值 | 行为 |
+|---|---|
+| `pairing`（默认） | 新号码首次发消息需生成配对码，人工执行 `openclaw pairing approve whatsapp <code>` 批准后才能对话 |
+| `allowlist` | 仅 `allowFrom` 列表内的号码可对话 |
+| `open` | 任何号码可直接对话，无需审核 |
+| `disabled` | 禁止私聊 |
+
+设置为 `open` 时必须同时把 `allowFrom` 加上 `"*"`，否则所有消息会被丢弃（网关会给出警告提示）：
+
+```bash
+openclaw config set channels.whatsapp.dmPolicy open
+openclaw config set channels.whatsapp.allowFrom '["*"]'
+openclaw daemon restart   # 修改配置后需重启网关才能生效
+```
+
+只想临时放行某个待审核的号码，不改全局策略：
+
+```bash
+openclaw pairing approve whatsapp <code>
+```
+
 ## 前端开发
 
 ```bash

@@ -12,8 +12,29 @@ vi.mock("../api", () => ({
 const pngDataUrl = "data:image/png;base64,ZmFrZQ==";
 
 afterEach(() => {
+  vi.useRealTimers();
+  get.mockReset();
+  post.mockReset();
   vi.clearAllMocks();
 });
+
+function mountCard() {
+  return mount(QrLoginCard, {
+    props: {
+      account: { id: "account-1", name: "客服一号", status: "pending" },
+      csrfToken: "csrf-token",
+    },
+    global: {
+      provide: { showToast: vi.fn() },
+      stubs: {
+        ElCard: { template: "<section><slot name='header' /><slot /></section>" },
+        ElTag: { template: "<span><slot /></span>" },
+        ElButton: { template: "<button @click='$emit(\"click\")'><slot /></button>" },
+        ElProgress: { template: "<div />" },
+      },
+    },
+  });
+}
 
 describe("QrLoginCard", () => {
   it("renders the native PNG returned by OpenClaw without rebuilding it on canvas", async () => {
@@ -23,27 +44,66 @@ describe("QrLoginCard", () => {
     });
     get.mockResolvedValue({ status: "qr_pending" });
 
-    const wrapper = mount(QrLoginCard, {
-      props: {
-        account: { id: "account-1", name: "客服一号", status: "pending" },
-        csrfToken: "csrf-token",
-      },
-      global: {
-        provide: { showToast: vi.fn() },
-        stubs: {
-          ElCard: { template: "<section><slot name='header' /><slot /></section>" },
-          ElTag: { template: "<span><slot /></span>" },
-          ElButton: { template: "<button @click='$emit(\"click\")'><slot /></button>" },
-          ElProgress: { template: "<div />" },
-        },
-      },
-    });
+    const wrapper = mountCard();
 
     await wrapper.find("button").trigger("click");
     await flushPromises();
 
     expect(wrapper.find("img").attributes("src")).toBe(pngDataUrl);
     expect(wrapper.find("canvas").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("stops the QR countdown after scanning and keeps polling until connected", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-14T12:00:00Z"));
+    post.mockResolvedValue({
+      qrData: pngDataUrl,
+      expiresAt: "2026-07-14T12:00:30Z",
+    });
+    get
+      .mockResolvedValueOnce({ status: "connecting" })
+      .mockResolvedValueOnce({ status: "connected" });
+
+    const wrapper = mountCard();
+    await wrapper.find("button").trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("0:30");
+
+    await vi.advanceTimersByTimeAsync(3000);
+    await flushPromises();
+    expect(wrapper.text()).toContain("正在连接 WhatsApp");
+    expect(wrapper.text()).not.toContain("二维码有效期剩余");
+
+    await vi.advanceTimersByTimeAsync(3000);
+    await flushPromises();
+    expect(wrapper.emitted("connected")).toHaveLength(1);
+    expect(wrapper.text()).toContain("WhatsApp 已连接");
+    wrapper.unmount();
+  });
+
+  it("waits up to one minute for connection after scanning", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-14T12:00:00Z"));
+    post.mockResolvedValue({
+      qrData: pngDataUrl,
+      expiresAt: "2026-07-14T12:00:30Z",
+    });
+    get.mockResolvedValue({ status: "connecting" });
+
+    const wrapper = mountCard();
+    await wrapper.find("button").trigger("click");
+    await flushPromises();
+
+    await vi.advanceTimersByTimeAsync(3000);
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(59000);
+    await flushPromises();
+    expect(wrapper.text()).toContain("正在连接 WhatsApp");
+
+    await vi.advanceTimersByTimeAsync(1000);
+    await flushPromises();
+    expect(wrapper.text()).toContain("连接超时，请重新获取二维码");
     wrapper.unmount();
   });
 });

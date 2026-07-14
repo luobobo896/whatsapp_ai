@@ -2,6 +2,8 @@ package middleware
 
 import (
 	"net/http"
+	"os"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -104,6 +106,43 @@ func RequirePlatformAdmin() gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": model.ErrorDetail{Code: "FORBIDDEN", Message: "Platform admin required."}})
 			return
 		}
+		c.Next()
+	}
+}
+
+// InternalAuth checks for a valid bearer token (INTERNAL_API_TOKEN env var).
+// When valid, it injects a synthetic session using the tenant derived from the
+// request body or query. This is intended for internal service-to-service calls
+// (e.g. MCP server → backend API).
+func InternalAuth(store *store.Store) gin.HandlerFunc {
+	expectedToken := strings.TrimSpace(os.Getenv("INTERNAL_API_TOKEN"))
+	return func(c *gin.Context) {
+		c.Set(StoreKey, store)
+
+		if expectedToken == "" {
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "CONFIG_ERROR", Message: "Internal API token not configured."}})
+			return
+		}
+
+		auth := c.GetHeader("Authorization")
+		if !strings.HasPrefix(auth, "Bearer ") || strings.TrimPrefix(auth, "Bearer ") != expectedToken {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": model.ErrorDetail{Code: "AUTH_REQUIRED", Message: "Invalid internal token."}})
+			return
+		}
+
+		// Build a minimal synthetic session. Tenant will be resolved per-handler
+		// from the request (e.g. accountId → tenantId), but we need a non-nil
+		// session so downstream handlers don't bail out.
+		c.Set(SessionKey, &model.Session{
+			CSRFToken:      "internal",
+			ActiveTenantID: "internal", // placeholder; handlers resolve real tenant
+			User: model.User{
+				ID:           "internal",
+				Email:        "internal@whatsapp-ai.local",
+				DisplayName:  "Internal Service",
+				PlatformRole: "platform_admin",
+			},
+		})
 		c.Next()
 	}
 }

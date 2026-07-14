@@ -42,7 +42,7 @@ try {
     const result = await waitForWebLogin({
       accountId,
       currentQrDataUrl,
-      timeoutMs: 35000,
+      timeoutMs: 90000,
     });
     if (result.qrDataUrl) {
       currentQrDataUrl = result.qrDataUrl;

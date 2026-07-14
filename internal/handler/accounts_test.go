@@ -6,7 +6,129 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"whatsapp-ai-poc/internal/model"
 )
+
+func TestQrSessionWaitsOneMinuteForConnectionAfterScan(t *testing.T) {
+	scannedAt := time.Date(2026, 7, 14, 12, 0, 29, 0, time.UTC)
+	session := &qrSession{
+		Status:    "qr_pending",
+		ExpiresAt: scannedAt.Add(time.Second),
+	}
+
+	status := updateQrSessionStatus(session, channelConnectionStatus{
+		Known:  true,
+		Linked: true,
+	}, scannedAt)
+	if status != "connecting" {
+		t.Fatalf("status after scan = %q, want connecting", status)
+	}
+	if got, want := session.ConnectionDeadline, scannedAt.Add(time.Minute); !got.Equal(want) {
+		t.Fatalf("connection deadline = %v, want %v", got, want)
+	}
+
+	status = updateQrSessionStatus(session, channelConnectionStatus{}, scannedAt.Add(59*time.Second))
+	if status != "connecting" {
+		t.Fatalf("status before connection deadline = %q, want connecting", status)
+	}
+
+	status = updateQrSessionStatus(session, channelConnectionStatus{}, scannedAt.Add(time.Minute))
+	if status != "expired" {
+		t.Fatalf("status at connection deadline = %q, want expired", status)
+	}
+}
+
+func TestQrSessionReportsConnectedAfterScan(t *testing.T) {
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	session := &qrSession{
+		Status:             "connecting",
+		ExpiresAt:          now.Add(-time.Second),
+		ConnectionDeadline: now.Add(time.Minute),
+	}
+
+	status := updateQrSessionStatus(session, channelConnectionStatus{
+		Known:     true,
+		Linked:    true,
+		Running:   true,
+		Connected: true,
+	}, now)
+	if status != "connected" {
+		t.Fatalf("status after connection = %q, want connected", status)
+	}
+}
+
+func TestRestartAndWaitForOpenClawAccountRequiresRunningConnection(t *testing.T) {
+	restartCalls := 0
+	statusCalls := 0
+	err := restartAndWaitForOpenClawAccount(
+		"wa_support",
+		func() error {
+			restartCalls++
+			return nil
+		},
+		func(accountKey string) channelConnectionStatus {
+			statusCalls++
+			if accountKey != "wa_support" {
+				t.Fatalf("status account = %q, want wa_support", accountKey)
+			}
+			if statusCalls == 1 {
+				return channelConnectionStatus{Known: true, Linked: true, Connected: true}
+			}
+			return channelConnectionStatus{Known: true, Linked: true, Running: true, Connected: true}
+		},
+		func() {},
+		3,
+	)
+	if err != nil {
+		t.Fatalf("restart and wait: %v", err)
+	}
+	if restartCalls != 1 {
+		t.Fatalf("restart calls = %d, want 1", restartCalls)
+	}
+	if statusCalls != 2 {
+		t.Fatalf("status calls = %d, want 2", statusCalls)
+	}
+}
+
+func TestApplyLiveAccountStatusesClearsStaleConnection(t *testing.T) {
+	accounts := []model.Account{{
+		ID:         "account-1",
+		AccountKey: "wa_support",
+		Status:     "connected",
+	}}
+	statuses := map[string]channelConnectionStatus{
+		"wa_support": {Known: true, Linked: true, Running: false, Connected: false},
+	}
+
+	changed := applyLiveAccountStatuses(accounts, statuses)
+	if accounts[0].Status != "pending" {
+		t.Fatalf("account status = %q, want pending", accounts[0].Status)
+	}
+	if len(changed) != 1 || changed[0].ID != "account-1" {
+		t.Fatalf("changed accounts = %#v, want account-1", changed)
+	}
+}
+
+func TestParseWhatsAppChannelStatusUsesRequestedAccount(t *testing.T) {
+	payload := []byte(`{
+  "channels": {
+    "whatsapp": {"linked": false, "connected": false}
+  },
+  "channelAccounts": {
+    "whatsapp": [
+      {"accountId": "default", "linked": false, "connected": false},
+      {"accountId": "wa_support", "linked": true, "connected": false}
+    ]
+  }
+}`)
+
+	status := parseWhatsAppChannelStatus(payload, "wa_support")
+	if !status.Known || !status.Linked || status.Connected {
+		t.Fatalf("requested account status = %#v, want linked but not connected", status)
+	}
+}
 
 func TestParseQrBridgeEventPreservesPngDataURL(t *testing.T) {
 	event, err := parseQrBridgeEvent([]byte(`{"type":"qr","qrDataUrl":"data:image/png;base64,ZmFrZQ=="}`))
@@ -33,7 +155,10 @@ func TestWhatsAppQrBridgeStreamsNativePngAndConnection(t *testing.T) {
 export async function startWebLoginWithQr() {
   return { qrDataUrl: "data:image/png;base64,ZmFrZQ==", message: "ready" };
 }
-export async function waitForWebLogin() {
+export async function waitForWebLogin(options) {
+  if (options.timeoutMs !== 90000) {
+    throw new Error("expected a 90-second bridge window");
+  }
   return { connected: true, message: "connected" };
 }
 `

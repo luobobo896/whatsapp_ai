@@ -428,6 +428,27 @@ func (s *Store) DeleteInvitation( id string) error {
 
 // ---- accounts ----
 
+// AllAccounts returns all accounts across all tenants (internal use only).
+func (s *Store) AllAccounts() ([]model.AccountRow, error) {
+	rows, err := s.pool.Query(context.Background(),
+		`SELECT id,tenant_id,name,account_key,status,daily_limit,kb_id,reply_limit,
+		        to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')
+		 FROM accounts ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var list []model.AccountRow
+	for rows.Next() {
+		var a model.AccountRow
+		if err := rows.Scan(&a.ID, &a.TenantID, &a.Name, &a.AccountKey, &a.Status, &a.DailyLimit, &a.KbID, &a.ReplyLimit, &a.CreatedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, a)
+	}
+	return list, rows.Err()
+}
+
 func (s *Store) AccountsByTenant( tenantID string) ([]model.Account, error) {
 	rows, err := s.pool.Query(context.Background(),
 		`SELECT id,name,account_key,status,daily_limit,kb_id,reply_limit,
@@ -440,8 +461,15 @@ func (s *Store) AccountsByTenant( tenantID string) ([]model.Account, error) {
 	var list []model.Account
 	for rows.Next() {
 		var a model.Account
-		if err := rows.Scan(&a.ID, &a.Name, &a.AccountKey, &a.Status, &a.DailyLimit, &a.KbID, &a.ReplyLimit, &a.CreatedAt); err != nil {
+		var kbIDRaw string
+		if err := rows.Scan(&a.ID, &a.Name, &a.AccountKey, &a.Status, &a.DailyLimit, &kbIDRaw, &a.ReplyLimit, &a.CreatedAt); err != nil {
 			return nil, err
+		}
+		if kbIDRaw != "" {
+			json.Unmarshal([]byte(kbIDRaw), &a.KbID)
+		}
+		if a.KbID == nil {
+			a.KbID = []string{}
 		}
 		list = append(list, a)
 	}
@@ -478,12 +506,21 @@ func (s *Store) AccountByID( tenantID, accountID string) (*model.AccountRow, err
 	return a, nil
 }
 
-func (s *Store) UpdateAccount( tenantID, accountID, name, kbID, status string, dailyLimit, replyLimit *int) (*model.AccountRow, error) {
+// TenantIDByAccountID returns the tenant that owns the given account.
+func (s *Store) TenantIDByAccountID(accountID string) (string, error) {
+	var tenantID string
+	err := s.pool.QueryRow(context.Background(),
+		`SELECT tenant_id FROM accounts WHERE id=$1`, accountID,
+	).Scan(&tenantID)
+	return tenantID, err
+}
+
+func (s *Store) UpdateAccount( tenantID, accountID, name, status string, kbID *string, dailyLimit, replyLimit *int) (*model.AccountRow, error) {
 	q := `UPDATE accounts SET `
 	args := []any{}
 	idx := 1
 	if name != "" { q += fmt.Sprintf(`name=$%d, `, idx); args = append(args, name); idx++ }
-	if kbID != "" { q += fmt.Sprintf(`kb_id=$%d, `, idx); args = append(args, kbID); idx++ }
+	if kbID != nil { q += fmt.Sprintf(`kb_id=$%d, `, idx); args = append(args, *kbID); idx++ }
 	if status != "" { q += fmt.Sprintf(`status=$%d, `, idx); args = append(args, status); idx++ }
 	if dailyLimit != nil { q += fmt.Sprintf(`daily_limit=$%d, `, idx); args = append(args, *dailyLimit); idx++ }
 	if replyLimit != nil { q += fmt.Sprintf(`reply_limit=$%d, `, idx); args = append(args, *replyLimit); idx++ }
@@ -711,6 +748,24 @@ func (s *Store) SaveMessage( tenantID, accountID, conversationID, customerName, 
 	return m, nil
 }
 
+// SaveMessageIfAbsent saves a message only when an identical one (same conversation,
+// role, and content) does not already exist. Used to persist OpenClaw-provided
+// history without creating duplicates on repeated calls.
+func (s *Store) SaveMessageIfAbsent(tenantID, accountID, conversationID, customerName, role, content, knowledgeIDs string) {
+	// Check existence first to avoid the INSERT overhead on the hot path.
+	var exists bool
+	s.pool.QueryRow(context.Background(),
+		"SELECT EXISTS(SELECT 1 FROM conversation_messages WHERE tenant_id=$1 AND conversation_id=$2 AND role=$3 AND content=$4)",
+		tenantID, conversationID, role, content,
+	).Scan(&exists)
+	if exists { return }
+	id := genID()
+	s.pool.Exec(context.Background(),
+		"INSERT INTO conversation_messages (id,tenant_id,account_id,conversation_id,customer_name,role,content,knowledge_ids) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING",
+		id, tenantID, accountID, conversationID, customerName, role, content, knowledgeIDs,
+	)
+}
+
 func (s *Store) LoadHistory( tenantID, conversationID string, limit int) ([]model.ConversationMessage, error) {
 	if limit <= 0 { limit = 20 }
 	rows, err := s.pool.Query(context.Background(),
@@ -731,13 +786,13 @@ func (s *Store) LoadHistory( tenantID, conversationID string, limit int) ([]mode
 }
 
 func (s *Store) ListConversationSummaries( tenantID, accountID string) ([]model.ConversationSummary, error) {
-	q := `SELECT conversation_id, customer_name, (SELECT content FROM conversation_messages cm2 WHERE cm2.tenant_id=$1 AND cm2.conversation_id=cm.conversation_id ORDER BY created_at DESC LIMIT 1) AS last_message, (SELECT to_char(created_at, 'YYYY-MM-DD HH24:MI:SS') FROM conversation_messages cm3 WHERE cm3.tenant_id=$1 AND cm3.conversation_id=cm.conversation_id ORDER BY created_at DESC LIMIT 1) AS last_message_at, COUNT(*) AS message_count FROM conversation_messages cm WHERE tenant_id=$1`
+	q := `SELECT cm.conversation_id, (SELECT customer_name FROM conversation_messages cm4 WHERE cm4.tenant_id=$1 AND cm4.conversation_id=cm.conversation_id ORDER BY created_at DESC LIMIT 1) AS customer_name, cm.account_id, (SELECT content FROM conversation_messages cm2 WHERE cm2.tenant_id=$1 AND cm2.conversation_id=cm.conversation_id ORDER BY created_at DESC LIMIT 1) AS last_message, (SELECT to_char(created_at, 'YYYY-MM-DD HH24:MI:SS') FROM conversation_messages cm3 WHERE cm3.tenant_id=$1 AND cm3.conversation_id=cm.conversation_id ORDER BY created_at DESC LIMIT 1) AS last_message_at, COUNT(*) AS message_count FROM conversation_messages cm WHERE tenant_id=$1`
 	args := []any{tenantID}
 	if accountID != "" {
-		q += ` AND account_id=$2`
+		q += ` AND cm.account_id=$2`
 		args = append(args, accountID)
 	}
-	q += ` GROUP BY conversation_id, customer_name ORDER BY last_message_at DESC`
+	q += ` GROUP BY cm.conversation_id, cm.account_id ORDER BY last_message_at DESC`
 	rows, err := s.pool.Query(context.Background(), q, args...)
 	if err != nil { return nil, err }
 	defer rows.Close()
@@ -745,7 +800,7 @@ func (s *Store) ListConversationSummaries( tenantID, accountID string) ([]model.
 	for rows.Next() {
 		var s model.ConversationSummary
 		var lastAt *string
-		if err := rows.Scan(&s.ConversationID, &s.CustomerName, &s.LastMessage, &lastAt, &s.MessageCount); err != nil {
+		if err := rows.Scan(&s.ConversationID, &s.CustomerName, &s.AccountID, &s.LastMessage, &lastAt, &s.MessageCount); err != nil {
 			return nil, err
 		}
 		if lastAt != nil { s.LastMessageAt = *lastAt }
@@ -753,6 +808,13 @@ func (s *Store) ListConversationSummaries( tenantID, accountID string) ([]model.
 	}
 	if list == nil { list = []model.ConversationSummary{} }
 	return list, rows.Err()
+}
+
+func (s *Store) DeleteConversation( tenantID, conversationID string) error {
+	_, err := s.pool.Exec(context.Background(),
+		"DELETE FROM conversation_messages WHERE tenant_id=$1 AND conversation_id=$2",
+		tenantID, conversationID)
+	return err
 }
 
 

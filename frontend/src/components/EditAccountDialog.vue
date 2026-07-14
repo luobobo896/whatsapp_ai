@@ -1,14 +1,14 @@
 <script setup>
 import { ref, inject, onMounted } from "vue";
-import { get, messageForError, post } from "../api";
+import { get, messageForError, patch } from "../api";
 
-const props = defineProps({ csrfToken: String });
-const emit = defineEmits(["close", "created"]);
+const props = defineProps({ account: Object, csrfToken: String });
+const emit = defineEmits(["close", "updated"]);
 const showToast = inject("showToast");
-const name = ref("");
-const dailyLimit = ref(30);
-const replyLimit = ref(30);
-const kbId = ref([]);
+const name = ref(props.account.name);
+const dailyLimit = ref(props.account.dailyLimit || 30);
+const replyLimit = ref(props.account.replyLimit || 30);
+const kbId = ref(Array.isArray(props.account.kbId) ? [...props.account.kbId] : []);
 const knowledgeBases = ref([]);
 const submitting = ref(false);
 
@@ -22,18 +22,15 @@ onMounted(async () => {
 async function submit() {
   submitting.value = true;
   try {
-    await post(
-      "/api/accounts",
-      {
-        name: name.value,
-        dailyLimit: Number(dailyLimit.value),
-        replyLimit: Number(replyLimit.value),
-        kbId: kbId.value,
-      },
-      props.csrfToken,
-    );
-    showToast({ tone: "success", message: "客服账号已创建" });
-    emit("created");
+    const body = {
+      name: name.value,
+      dailyLimit: Number(dailyLimit.value),
+      replyLimit: Number(replyLimit.value),
+      kbId: kbId.value,
+    };
+    await patch(`/api/accounts/${props.account.id}`, body, props.csrfToken);
+    showToast({ tone: "success", message: "账号已更新" });
+    emit("updated");
   } catch (e) {
     showToast({ tone: "error", message: messageForError(e) });
   } finally {
@@ -43,12 +40,11 @@ async function submit() {
 </script>
 
 <template>
-  <el-dialog model-value title="新建客服账号" width="480px" @close="emit('close')">
-    <p style="color:#6b736d;font-size:13px;margin:0 0 16px">创建后需扫码登录对接 WhatsApp</p>
-    <el-input v-model="name" placeholder="例如：售前客服" style="margin-bottom:14px" />
+  <el-dialog model-value title="编辑客服账号" width="480px" @close="emit('close')">
+    <el-input v-model="name" placeholder="账号名称" style="margin-bottom:14px" />
     <div style="margin-bottom:14px">
       <label style="display:block;font-size:13px;color:#3d403d;margin-bottom:4px">绑定知识库</label>
-      <el-select v-model="kbId" placeholder="选择知识库（可选）" clearable multiple style="width:100%">
+      <el-select v-model="kbId" placeholder="选择知识库" clearable multiple style="width:100%">
         <el-option
           v-for="kb in knowledgeBases"
           :key="kb.id"
@@ -61,7 +57,7 @@ async function submit() {
     <el-input-number v-model="replyLimit" :min="1" :max="500" placeholder="每次加载消息上限" style="width:100%" />
     <template #footer>
       <el-button @click="emit('close')">取消</el-button>
-      <el-button type="primary" :loading="submitting" @click="submit">创建账号</el-button>
+      <el-button type="primary" :loading="submitting" @click="submit">保存</el-button>
     </template>
   </el-dialog>
 </template>

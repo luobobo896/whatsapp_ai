@@ -81,6 +81,12 @@ func run() error {
 		handler.RegisterPlatformTenants(platform, st)
 	}
 
+	// Internal API (bearer token auth for service-to-service calls)
+	internalAPI := router.Group("/api/internal", middleware.InternalAuth(st))
+	{
+		handler.RegisterInternalConversations(internalAPI.Group("/conversations"), st)
+	}
+
 	// SPA fallback
 	frontend := web.Handler()
 	router.NoRoute(func(c *gin.Context) {

@@ -16,6 +16,7 @@ import TenantsView from "./TenantsView.vue";
 import MembersView from "./MembersView.vue";
 import CreateTenantDialog from "../components/CreateTenantDialog.vue";
 import CreateAccountDialog from "../components/CreateAccountDialog.vue";
+import EditAccountDialog from "../components/EditAccountDialog.vue";
 import CreateKnowledgeDialog from "../components/CreateKnowledgeDialog.vue";
 import InviteMemberDialog from "../components/InviteMemberDialog.vue";
 import TenantCredentialsResult from "../components/TenantCredentialsResult.vue";
@@ -63,6 +64,8 @@ const refreshVersion = ref(0);
 
 const createTenantOpen = ref(false);
 const createAccountOpen = ref(false);
+const editAccountOpen = ref(false);
+const editingAccount = ref(null);
 const createKnowledgeOpen = ref(false);
 const inviteMemberOpen = ref(false);
 const invitation = ref(null);
@@ -246,7 +249,9 @@ function navigate(v) {
         <AccountsView
           v-if="!loading && view === 'accounts'"
           :accounts="accounts" :can-manage="canManageAccounts" :csrf-token="session?.csrfToken"
+          :knowledge-bases="knowledgeBases"
           @create="createAccountOpen = true"
+          @edit="(acct) => { editingAccount = acct; editAccountOpen = true }"
           @chat="(acct) => { chatAccount = acct; view = 'chat' }"
           @changed="loadData()"
         />
@@ -269,7 +274,7 @@ function navigate(v) {
           @base-updated="() => { editingKnowledgeBase = selectedKnowledgeBase; editKnowledgeOpen = true; }"
           @articles-changed="loadData()"
         />
-        <ConversationsView v-if="!loading && view === 'conversations'" :conversations="conversations" :accounts="accounts" @chat="(acct) => { chatAccount = acct; view = 'chat' }" />
+        <ConversationsView v-if="!loading && view === 'conversations'" :conversations="conversations" :accounts="accounts" @chat="(acct) => { chatAccount = acct; view = 'chat' }" @changed="loadData()" />
         <ChatView
           v-if="!loading && view === 'chat' && chatAccount"
           :account="chatAccount"
@@ -292,6 +297,13 @@ function navigate(v) {
       @close="createTenantOpen = false" @created="(c) => { createTenantOpen = false; tenantCredentials = c; loadData(); }" />
     <CreateAccountDialog v-if="createAccountOpen" :csrf-token="session?.csrfToken"
       @close="createAccountOpen = false" @created="() => { createAccountOpen = false; loadData(); }" />
+    <EditAccountDialog
+      v-if="editAccountOpen && editingAccount"
+      :account="editingAccount"
+      :csrf-token="session?.csrfToken"
+      @close="editAccountOpen = false; editingAccount = null"
+      @updated="() => { editAccountOpen = false; editingAccount = null; loadData(); }"
+    />
     <CreateKnowledgeDialog v-if="createKnowledgeOpen" :csrf-token="session?.csrfToken"
       @close="createKnowledgeOpen = false" @created="() => { createKnowledgeOpen = false; loadData(); }" />
     <InviteMemberDialog v-if="inviteMemberOpen" :csrf-token="session?.csrfToken"
