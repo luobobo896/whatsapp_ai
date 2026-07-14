@@ -131,8 +131,17 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("ddl: %w\n%s", err, d)
 		}
 	}
+	// Extensions
+	s.pool.Exec(context.Background(), `CREATE EXTENSION IF NOT EXISTS pg_trgm`)
 	// Migrations
 	s.pool.Exec(context.Background(), `ALTER TABLE knowledge_articles ADD COLUMN IF NOT EXISTS attributes TEXT NOT NULL DEFAULT '{}'`)
+	// Performance indexes
+	s.pool.Exec(context.Background(), `CREATE INDEX IF NOT EXISTS idx_articles_title_trgm ON knowledge_articles USING GIN (title gin_trgm_ops)`)
+	s.pool.Exec(context.Background(), `CREATE INDEX IF NOT EXISTS idx_articles_content_trgm ON knowledge_articles USING GIN (content gin_trgm_ops)`)
+	s.pool.Exec(context.Background(), `CREATE INDEX IF NOT EXISTS idx_articles_status ON knowledge_articles(status)`)
+	s.pool.Exec(context.Background(), `CREATE INDEX IF NOT EXISTS idx_articles_kbid ON knowledge_articles(knowledge_base_id)`)
+	s.pool.Exec(context.Background(), `CREATE INDEX IF NOT EXISTS idx_kb_tenant_status ON knowledge_bases(tenant_id, status)`)
+	s.pool.Exec(context.Background(), `CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON knowledge_chunks(article_id) WHERE embedding IS NOT NULL`)
 	s.pool.Exec(context.Background(), `ALTER TABLE knowledge_articles ADD COLUMN IF NOT EXISTS search_vector tsvector`)
 	s.pool.Exec(context.Background(), `CREATE INDEX IF NOT EXISTS idx_articles_search ON knowledge_articles USING GIN (search_vector)`)
 	s.pool.Exec(context.Background(), `CREATE OR REPLACE FUNCTION articles_search_update() RETURNS trigger AS $$ BEGIN NEW.search_vector := setweight(to_tsvector('simple', COALESCE(NEW.title, '')), 'A') || setweight(to_tsvector('simple', COALESCE(NEW.content, '')), 'B') || setweight(to_tsvector('simple', COALESCE(NEW.category, '')), 'C') || setweight(to_tsvector('simple', COALESCE(NEW.attributes, '')), 'D'); RETURN NEW; END; $$ LANGUAGE plpgsql`)
@@ -544,6 +553,8 @@ func (s *Store) SearchKnowledge( tenantID, query string, embedding []float32, li
 		}
 	// ILIKE fallback for Chinese text
 	words := splitQuery(query)
+	// Cap at 10 tokens to avoid SQL explosion; pg_trgm GIN indexes handle ILIKE efficiently
+	if len(words) > 10 { words = words[:10] }
 	if len(words) == 0 { return []model.SearchResultItem{}, nil }
 	scoreParts := make([]string, len(words))
 	likeParts := make([]string, len(words))
