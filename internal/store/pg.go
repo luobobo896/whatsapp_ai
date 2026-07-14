@@ -552,9 +552,11 @@ func (s *Store) AllAccounts() ([]model.AccountRow, error) {
 
 func (s *Store) AccountsByTenant( tenantID string) ([]model.Account, error) {
 	rows, err := s.pool.Query(context.Background(),
-		`SELECT id,name,account_key,status,daily_limit,kb_id,reply_limit,
-		        to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')
-		 FROM accounts WHERE tenant_id=$1 ORDER BY created_at`, tenantID)
+		`SELECT a.id,a.name,a.account_key,a.status,a.daily_limit,
+		        (SELECT COUNT(*) FROM conversation_messages cm WHERE cm.tenant_id=$1 AND cm.account_id=a.id AND cm.role='assistant' AND cm.created_at >= date_trunc('day', CURRENT_TIMESTAMP)),
+		        a.kb_id,a.reply_limit,
+		        to_char(a.created_at, 'YYYY-MM-DD HH24:MI:SS')
+		 FROM accounts a WHERE a.tenant_id=$1 ORDER BY a.created_at`, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -563,7 +565,7 @@ func (s *Store) AccountsByTenant( tenantID string) ([]model.Account, error) {
 	for rows.Next() {
 		var a model.Account
 		var kbIDRaw string
-		if err := rows.Scan(&a.ID, &a.Name, &a.AccountKey, &a.Status, &a.DailyLimit, &kbIDRaw, &a.ReplyLimit, &a.CreatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.Name, &a.AccountKey, &a.Status, &a.DailyLimit, &a.DailyReplies, &kbIDRaw, &a.ReplyLimit, &a.CreatedAt); err != nil {
 			return nil, err
 		}
 		if kbIDRaw != "" {

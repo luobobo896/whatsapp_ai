@@ -162,6 +162,7 @@ type Account struct {
 	AccountKey string   `json:"accountKey"`
 	Status     string   `json:"status"`
 	DailyLimit int      `json:"dailyLimit"`
+	DailyReplies int    `json:"dailyReplies"`
 	KbID       []string `json:"kbId"`
 	ReplyLimit int      `json:"replyLimit"`
 	CreatedAt  string   `json:"createdAt"`

@@ -54,8 +54,8 @@ function onAccountChanged() {
           <span v-else style="color:#c0c4cc">未绑定</span>
         </template>
       </el-table-column>
-      <el-table-column prop="dailyLimit" label="每日上限">
-        <template #default="{ row }">{{ row.dailyLimit || "不限" }}</template>
+      <el-table-column label="今日回复">
+        <template #default="{ row }">{{ row.dailyReplies || 0 }} / {{ row.dailyLimit || "不限" }}</template>
       </el-table-column>
       <el-table-column label="创建时间">
         <template #default="{ row }">{{ formatDate(row.createdAt) }}</template>
