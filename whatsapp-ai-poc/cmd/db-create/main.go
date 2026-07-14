@@ -49,7 +49,7 @@ func run(ctx context.Context, getenv func(string) string, output io.Writer) erro
 	} else {
 		var restricted bool
 		if err := conn.QueryRow(ctx, `
-			SELECT NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolbypassrls AND NOT rolinherit
+			SELECT rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolbypassrls AND NOT rolinherit
 			FROM pg_roles WHERE rolname = 'whatsapp_app'
 		`).Scan(&restricted); err != nil || !restricted {
 			return fmt.Errorf("existing whatsapp_app role is not restricted")
@@ -64,12 +64,15 @@ func run(ctx context.Context, getenv func(string) string, output io.Writer) erro
 		}
 		if exists {
 			fmt.Fprintf(output, "%s already exists\n", name)
-			continue
+		} else {
+			if _, err := conn.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
+				return fmt.Errorf("create database %s failed", name)
+			}
+			fmt.Fprintf(output, "%s created\n", name)
 		}
-		if _, err := conn.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()); err != nil {
-			return fmt.Errorf("create database %s failed", name)
+		if _, err := conn.Exec(ctx, "GRANT CONNECT ON DATABASE "+pgx.Identifier{name}.Sanitize()+" TO whatsapp_app"); err != nil {
+			return fmt.Errorf("grant database %s access failed", name)
 		}
-		fmt.Fprintf(output, "%s created\n", name)
 	}
 	return nil
 }

@@ -111,6 +111,14 @@ func Revoke(ctx context.Context, pool *pgxpool.Pool, rawToken string) error {
 	return err
 }
 
+func RevokeUserSessions(ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID) error {
+	_, err := pool.Exec(ctx, `
+		UPDATE auth_sessions SET revoked_at = COALESCE(revoked_at, now())
+		WHERE user_id = $1 AND revoked_at IS NULL
+	`, userID)
+	return err
+}
+
 func SelectTenant(ctx context.Context, pool *pgxpool.Pool, sessionID, tenantID uuid.UUID) error {
 	_, err := database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) (struct{}, error) {
 		var tenantStatus, membershipStatus string

@@ -3,6 +3,7 @@ package auth_test
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -96,6 +97,32 @@ func TestExpiredSessionAndLoginRateLimit(t *testing.T) {
 			assertError(t, invalid, http.StatusUnauthorized, "AUTH_INVALID")
 		} else {
 			assertError(t, invalid, http.StatusTooManyRequests, "RATE_LIMITED")
+		}
+	}
+}
+
+func TestAdministratorCanRevokeAllUserSessions(t *testing.T) {
+	_, pool := newAuthServer(t, 10)
+	var userID uuid.UUID
+	if err := pool.QueryRow(t.Context(), "SELECT id FROM users WHERE email = 'admin@example.com'").Scan(&userID); err != nil {
+		t.Fatal(err)
+	}
+	var issued []auth.SessionTokens
+	for range 2 {
+		tokens, err := database.WithPlatformTx(t.Context(), pool, func(tx pgx.Tx) (auth.SessionTokens, error) {
+			return auth.Issue(t.Context(), tx, userID, time.Hour)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		issued = append(issued, tokens)
+	}
+	if err := auth.RevokeUserSessions(t.Context(), pool, userID); err != nil {
+		t.Fatal(err)
+	}
+	for _, tokens := range issued {
+		if _, err := auth.Resolve(t.Context(), pool, tokens.SessionToken); !errors.Is(err, auth.ErrSessionExpired) {
+			t.Fatalf("revoked session resolved with error %v", err)
 		}
 	}
 }

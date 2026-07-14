@@ -28,12 +28,12 @@ Foundation 使用三套数据库权限：
 用 migration/admin 连接执行：
 
 ```sql
-SELECT rolname, rolsuper, rolcreatedb, rolcreaterole, rolbypassrls, rolinherit
+SELECT rolname, rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolbypassrls, rolinherit
 FROM pg_roles
 WHERE rolname = 'whatsapp_app';
 ```
 
-`rolsuper`、`rolcreatedb`、`rolcreaterole`、`rolbypassrls` 和 `rolinherit` 必须全部为 `false`。Tenant-owned 表必须同时显示 `relrowsecurity=true` 与 `relforcerowsecurity=true`。
+`rolcanlogin` 必须为 `true`；`rolsuper`、`rolcreatedb`、`rolcreaterole`、`rolbypassrls` 和 `rolinherit` 必须全部为 `false`。Tenant-owned 表必须同时显示 `relrowsecurity=true` 与 `relforcerowsecurity=true`。
 
 ```sql
 SELECT relname, relrowsecurity, relforcerowsecurity

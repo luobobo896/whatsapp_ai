@@ -53,16 +53,16 @@ func TestMigrationsAreRepeatableAndRestricted(t *testing.T) {
 		}
 	}
 
-	var superuser, createDB, createRole, bypassRLS, inherit bool
+	var superuser, createDB, createRole, bypassRLS, inherit, canLogin bool
 	if err := conn.QueryRow(t.Context(), `
-		SELECT rolsuper, rolcreatedb, rolcreaterole, rolbypassrls, rolinherit
+		SELECT rolsuper, rolcreatedb, rolcreaterole, rolbypassrls, rolinherit, rolcanlogin
 		FROM pg_roles WHERE rolname = 'whatsapp_app'
-	`).Scan(&superuser, &createDB, &createRole, &bypassRLS, &inherit); err != nil {
+	`).Scan(&superuser, &createDB, &createRole, &bypassRLS, &inherit, &canLogin); err != nil {
 		t.Fatal(err)
 	}
-	if superuser || createDB || createRole || bypassRLS || inherit {
-		t.Fatalf("application role is privileged: super=%v createdb=%v createrole=%v bypassrls=%v inherit=%v",
-			superuser, createDB, createRole, bypassRLS, inherit)
+	if superuser || createDB || createRole || bypassRLS || inherit || !canLogin {
+		t.Fatalf("application role is invalid: super=%v createdb=%v createrole=%v bypassrls=%v inherit=%v login=%v",
+			superuser, createDB, createRole, bypassRLS, inherit, canLogin)
 	}
 	var ownsSchema, ledgerAccess bool
 	if err := conn.QueryRow(t.Context(), `

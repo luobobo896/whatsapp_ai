@@ -84,6 +84,19 @@ func (s *Service) Invite(ctx context.Context, tenant TenantContext, input Invite
 		return IssuedInvitation{}, apperror.Validation("A valid email and role are required.", nil)
 	}
 	result, err := database.WithTenantTx(ctx, s.pool, tenant.TenantID, func(tx pgx.Tx) (IssuedInvitation, error) {
+		var alreadyMember bool
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM tenant_memberships m
+				JOIN users u ON u.id = m.user_id
+				WHERE m.tenant_id = $1 AND lower(u.email) = $2
+			)
+		`, tenant.TenantID, email).Scan(&alreadyMember); err != nil {
+			return IssuedInvitation{}, err
+		}
+		if alreadyMember {
+			return IssuedInvitation{}, apperror.Conflict("This user is already a tenant member.")
+		}
 		invitation, err := s.IssueInTx(ctx, tx, tenant.TenantID, tenant.UserID, email, input.Role)
 		if err != nil {
 			return IssuedInvitation{}, err
@@ -154,6 +167,13 @@ func (s *Service) Accept(ctx context.Context, token string, input AcceptInput) (
 	}
 
 	accepted, err := database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) (AcceptedInvitation, error) {
+		var tenantStatus string
+		if err := tx.QueryRow(ctx, "SELECT status FROM tenants WHERE id = $1", tenantID).Scan(&tenantStatus); err != nil {
+			return AcceptedInvitation{}, err
+		}
+		if tenantStatus == "suspended" {
+			return AcceptedInvitation{}, apperror.TenantSuspended()
+		}
 		var invitationID uuid.UUID
 		var invitedEmail string
 		var role Role
@@ -178,7 +198,7 @@ func (s *Service) Accept(ctx context.Context, token string, input AcceptInput) (
 			return AcceptedInvitation{}, apperror.Conflict("This invitation is no longer valid.")
 		}
 
-		userID, err := upsertInvitedUser(ctx, tx, email, displayName, encodedPassword)
+		userID, err := resolveInvitedUser(ctx, tx, email, displayName, input.Password, encodedPassword)
 		if err != nil {
 			return AcceptedInvitation{}, err
 		}
@@ -300,9 +320,12 @@ func (s *Service) Update(ctx context.Context, tenant TenantContext, userID uuid.
 	return translateConflict(err)
 }
 
-func upsertInvitedUser(ctx context.Context, tx pgx.Tx, email, displayName, encodedPassword string) (uuid.UUID, error) {
+func resolveInvitedUser(ctx context.Context, tx pgx.Tx, email, displayName, password, encodedPassword string) (uuid.UUID, error) {
 	var userID uuid.UUID
-	err := tx.QueryRow(ctx, "SELECT id FROM users WHERE lower(email) = $1 FOR UPDATE", email).Scan(&userID)
+	var currentPassword, status string
+	err := tx.QueryRow(ctx,
+		"SELECT id, password_hash, status FROM users WHERE lower(email) = $1 FOR UPDATE", email,
+	).Scan(&userID, &currentPassword, &status)
 	if errors.Is(err, pgx.ErrNoRows) {
 		userID = uuid.New()
 		_, err = tx.Exec(ctx, `
@@ -314,12 +337,19 @@ func upsertInvitedUser(ctx context.Context, tx pgx.Tx, email, displayName, encod
 	if err != nil {
 		return uuid.Nil, err
 	}
-	_, err = tx.Exec(ctx, `
-		UPDATE users SET display_name = $2, password_hash = $3, status = 'active',
-			password_changed_at = now(), updated_at = now()
-		WHERE id = $1
-	`, userID, displayName, encodedPassword)
-	return userID, err
+	if !auth.VerifyPassword(currentPassword, password) {
+		return uuid.Nil, apperror.AuthInvalid()
+	}
+	if status == "disabled" {
+		_, err = tx.Exec(ctx, `
+			UPDATE users SET status = 'active', password_changed_at = now(), updated_at = now()
+			WHERE id = $1
+		`, userID)
+		if err != nil {
+			return uuid.Nil, err
+		}
+	}
+	return userID, nil
 }
 
 func invitationToken() (string, error) {

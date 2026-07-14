@@ -67,6 +67,35 @@ func TestTenantLifecycle(t *testing.T) {
 	ownerCookie := tenantCookie(t, accepted, "wa_session")
 	ownerCSRF := tenantJSONString(t, accepted, "csrfToken")
 	ownerHeaders := map[string]string{"Origin": "http://localhost:8790", "X-CSRF-Token": ownerCSRF}
+	var originalPasswordHash, originalDisplayName string
+	if err := admin.QueryRow(t.Context(), "SELECT password_hash, display_name FROM users WHERE id = $1", ownerID).Scan(&originalPasswordHash, &originalDisplayName); err != nil {
+		t.Fatal(err)
+	}
+
+	secondTenant := tenantRequest(t, router, http.MethodPost, "/api/platform/tenants", map[string]any{
+		"name": "Second", "slug": "second", "ownerEmail": "owner@example.com", "ownerDisplayName": "Ignored",
+	}, protectedHeaders, platformCookie)
+	if secondTenant.Code != http.StatusCreated {
+		t.Fatalf("create second tenant status=%d body=%s", secondTenant.Code, secondTenant.Body.String())
+	}
+	secondToken := tenantJSONNestedString(t, secondTenant, "invitation", "token")
+	takeover := tenantRequest(t, router, http.MethodPost, "/api/invitations/"+secondToken+"/accept", map[string]any{
+		"email": "owner@example.com", "displayName": "Hijacked", "password": "attacker password",
+	}, nil, nil)
+	tenantAssertError(t, takeover, http.StatusUnauthorized, "AUTH_INVALID")
+	acceptedExisting := tenantRequest(t, router, http.MethodPost, "/api/invitations/"+secondToken+"/accept", map[string]any{
+		"email": "owner@example.com", "displayName": "Hijacked", "password": "owner password",
+	}, nil, nil)
+	if acceptedExisting.Code != http.StatusCreated {
+		t.Fatalf("existing user acceptance status=%d body=%s", acceptedExisting.Code, acceptedExisting.Body.String())
+	}
+	var passwordHashAfter, displayNameAfter string
+	if err := admin.QueryRow(t.Context(), "SELECT password_hash, display_name FROM users WHERE id = $1", ownerID).Scan(&passwordHashAfter, &displayNameAfter); err != nil {
+		t.Fatal(err)
+	}
+	if passwordHashAfter != originalPasswordHash || displayNameAfter != originalDisplayName {
+		t.Fatal("existing-user invitation changed global credentials or profile")
+	}
 
 	selected := tenantRequest(t, router, http.MethodPost, "/api/auth/select-tenant", map[string]any{
 		"tenantId": tenantID,
@@ -74,6 +103,10 @@ func TestTenantLifecycle(t *testing.T) {
 	if selected.Code != http.StatusNoContent {
 		t.Fatalf("select tenant status=%d body=%s", selected.Code, selected.Body.String())
 	}
+	reinviteOwner := tenantRequest(t, router, http.MethodPost, "/api/members/invitations", map[string]any{
+		"email": "owner@example.com", "role": "viewer",
+	}, ownerHeaders, ownerCookie)
+	tenantAssertError(t, reinviteOwner, http.StatusConflict, "CONFLICT")
 
 	forgedTenant := uuid.New()
 	invited := tenantRequest(t, router, http.MethodPost, "/api/members/invitations", map[string]any{
@@ -82,6 +115,7 @@ func TestTenantLifecycle(t *testing.T) {
 	if invited.Code != http.StatusCreated {
 		t.Fatalf("invite status=%d body=%s", invited.Code, invited.Body.String())
 	}
+	viewerToken := tenantJSONNestedString(t, invited, "invitation", "token")
 	var invitationTenant uuid.UUID
 	if err := admin.QueryRow(t.Context(), `
 		SELECT tenant_id FROM member_invitations
@@ -111,6 +145,10 @@ func TestTenantLifecycle(t *testing.T) {
 	}
 	tenantAccess := tenantRequest(t, router, http.MethodGet, "/api/members", nil, nil, ownerCookie)
 	tenantAssertError(t, tenantAccess, http.StatusForbidden, "TENANT_SUSPENDED")
+	suspendedAcceptance := tenantRequest(t, router, http.MethodPost, "/api/invitations/"+viewerToken+"/accept", map[string]any{
+		"email": "viewer@example.com", "displayName": "Viewer", "password": "viewer password",
+	}, nil, nil)
+	tenantAssertError(t, suspendedAcceptance, http.StatusForbidden, "TENANT_SUSPENDED")
 
 	var audits int
 	if err := admin.QueryRow(t.Context(), "SELECT count(*) FROM audit_logs WHERE tenant_id = $1", tenantID).Scan(&audits); err != nil {

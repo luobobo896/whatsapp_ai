@@ -48,11 +48,3 @@ func WriteError(c *gin.Context, err error) {
 func NoRoute(c *gin.Context) error {
 	return apperror.NotFound()
 }
-
-func Empty(c *gin.Context, status int) {
-	c.Status(status)
-}
-
-func JSON(c *gin.Context, status int, value any) {
-	c.JSON(status, value)
-}

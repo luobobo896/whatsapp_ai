@@ -41,3 +41,22 @@ func TestRedactDoesNotMutateInput(t *testing.T) {
 		t.Fatal("redaction mutated caller input")
 	}
 }
+
+func TestRedactSecretsInStructs(t *testing.T) {
+	type credentials struct {
+		APIKey string `json:"apiKey"`
+		Label  string `json:"label"`
+	}
+	type change struct {
+		Password    string      `json:"password"`
+		Credentials credentials `json:"credentials"`
+	}
+	want := map[string]any{
+		"password":    "[REDACTED]",
+		"credentials": map[string]any{"apiKey": "[REDACTED]", "label": "Model"},
+	}
+	got := audit.Redact(change{Password: "real", Credentials: credentials{APIKey: "real", Label: "Model"}})
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("struct redaction mismatch\n got: %#v\nwant: %#v", got, want)
+	}
+}

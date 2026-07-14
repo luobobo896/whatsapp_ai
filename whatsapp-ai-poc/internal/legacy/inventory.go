@@ -70,11 +70,10 @@ func Inspect(ctx context.Context, paths Paths) (Report, error) {
 
 	var report Report
 	report.Conflicts = make([]Conflict, 0)
-	roleIDs, entryIDs, err := inspectKnowledge(knowledgeData, filepath.Base(paths.KnowledgeJSON), &report)
+	roleIDs, err := inspectKnowledge(knowledgeData, filepath.Base(paths.KnowledgeJSON), &report)
 	if err != nil {
 		return Report{}, err
 	}
-	_ = entryIDs
 	if err := inspectAccounts(accountsData, filepath.Base(paths.AccountsJSON), roleIDs, &report); err != nil {
 		return Report{}, err
 	}
@@ -97,10 +96,10 @@ func Inspect(ctx context.Context, paths Paths) (Report, error) {
 	return report, nil
 }
 
-func inspectKnowledge(data []byte, source string, report *Report) (map[string]struct{}, map[string]struct{}, error) {
+func inspectKnowledge(data []byte, source string, report *Report) (map[string]struct{}, error) {
 	var wire knowledgeWire
 	if err := json.Unmarshal(data, &wire); err != nil || wire.Roles == nil {
-		return nil, nil, fmt.Errorf("decode %s failed", source)
+		return nil, fmt.Errorf("decode %s failed", source)
 	}
 	roleIDs := make(map[string]struct{})
 	entryIDs := make(map[string]struct{})
@@ -132,7 +131,7 @@ func inspectKnowledge(data []byte, source string, report *Report) (map[string]st
 			}
 		}
 	}
-	return roleIDs, entryIDs, nil
+	return roleIDs, nil
 }
 
 func inspectAccounts(data []byte, source string, roleIDs map[string]struct{}, report *Report) error {

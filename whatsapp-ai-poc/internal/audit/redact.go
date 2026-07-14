@@ -1,51 +1,44 @@
 package audit
 
 import (
-	"reflect"
+	"encoding/json"
 	"strings"
 )
 
 const redacted = "[REDACTED]"
 
 func Redact(value any) any {
-	return redactValue(reflect.ValueOf(value))
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return redacted
+	}
+	var normalized any
+	if err := json.Unmarshal(encoded, &normalized); err != nil {
+		return redacted
+	}
+	return redactValue(normalized)
 }
 
-func redactValue(value reflect.Value) any {
-	if !value.IsValid() {
-		return nil
-	}
-	for value.Kind() == reflect.Interface || value.Kind() == reflect.Pointer {
-		if value.IsNil() {
-			return nil
-		}
-		value = value.Elem()
-	}
-
-	switch value.Kind() {
-	case reflect.Map:
-		if value.Type().Key().Kind() != reflect.String {
-			return value.Interface()
-		}
-		result := make(map[string]any, value.Len())
-		iterator := value.MapRange()
-		for iterator.Next() {
-			key := iterator.Key().String()
+func redactValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		result := make(map[string]any, len(typed))
+		for key, item := range typed {
 			if secretKey(key) {
 				result[key] = redacted
 			} else {
-				result[key] = redactValue(iterator.Value())
+				result[key] = redactValue(item)
 			}
 		}
 		return result
-	case reflect.Slice, reflect.Array:
-		result := make([]any, value.Len())
-		for i := range value.Len() {
-			result[i] = redactValue(value.Index(i))
+	case []any:
+		result := make([]any, len(typed))
+		for i, item := range typed {
+			result[i] = redactValue(item)
 		}
 		return result
 	default:
-		return value.Interface()
+		return value
 	}
 }
 

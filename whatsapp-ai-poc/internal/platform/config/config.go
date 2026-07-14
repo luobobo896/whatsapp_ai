@@ -46,7 +46,8 @@ func Parse(getenv func(string) string) (Config, error) {
 	}
 
 	origin, err := url.Parse(strings.TrimSpace(getenv("APP_ORIGIN")))
-	if err != nil || origin.Host == "" || (origin.Scheme != "http" && origin.Scheme != "https") || origin.User != nil {
+	if err != nil || origin.Host == "" || (origin.Scheme != "http" && origin.Scheme != "https") ||
+		origin.User != nil || origin.Path != "" || origin.RawQuery != "" || origin.ForceQuery || origin.Fragment != "" {
 		return Config{}, invalid("APP_ORIGIN")
 	}
 
