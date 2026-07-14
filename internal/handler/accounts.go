@@ -30,6 +30,7 @@ var qrCacheMu sync.Mutex
 var qrBridgePathOnce sync.Once
 var qrBridgePath string
 var qrBridgePathErr error
+var openClawConfigMu sync.Mutex
 
 var (
 	openClawAvailable   bool
@@ -189,6 +190,13 @@ func ensureOpenClawAccount(accountKey string) error {
 	if err != nil {
 		return err
 	}
+	return ensureOpenClawAccountAtPath(cfgPath, accountKey)
+}
+
+func ensureOpenClawAccountAtPath(cfgPath, accountKey string) error {
+	openClawConfigMu.Lock()
+	defer openClawConfigMu.Unlock()
+
 	data, err := os.ReadFile(cfgPath)
 	if err != nil {
 		return err

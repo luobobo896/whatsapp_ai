@@ -1,11 +1,13 @@
 package handler
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -113,6 +115,45 @@ func TestEnsureOpenClawAccountConfigCreatesMissingChannels(t *testing.T) {
 	accounts := whatsApp["accounts"].(map[string]any)
 	if _, ok := accounts["wa_support"]; !ok {
 		t.Fatal("missing registered account")
+	}
+}
+
+func TestEnsureOpenClawAccountAtPathPreservesConcurrentRegistrations(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "openclaw.json")
+	if err := os.WriteFile(configPath, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	accountKeys := []string{"wa_sales", "wa_support", "wa_returns", "wa_vip"}
+	var wg sync.WaitGroup
+	errs := make(chan error, len(accountKeys))
+	for _, key := range accountKeys {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- ensureOpenClawAccountAtPath(configPath, key)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	accounts := cfg["channels"].(map[string]any)["whatsapp"].(map[string]any)["accounts"].(map[string]any)
+	for _, key := range accountKeys {
+		if _, ok := accounts[key]; !ok {
+			t.Fatalf("missing account %q in %#v", key, accounts)
+		}
 	}
 }
 
