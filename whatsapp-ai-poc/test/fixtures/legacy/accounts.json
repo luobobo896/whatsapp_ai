@@ -1,0 +1,10 @@
+{
+  "account-valid": {
+    "label": "Valid account",
+    "allowedProducts": ["role-one", "missing-role"]
+  },
+  "account-invalid": {
+    "label": "",
+    "allowedProducts": "role-two"
+  }
+}
