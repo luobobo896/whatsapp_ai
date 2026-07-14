@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -24,6 +25,12 @@ type ChunkInfo struct {
 }
 
 type Store struct{ pool *pgxpool.Pool }
+
+var ErrDailyReplyLimitReached = errors.New("daily reply limit reached")
+
+func dailyReplyLimitReached(limit, count int) bool {
+	return limit > 0 && count >= limit
+}
 
 func Open(ctx context.Context, dsn string) (*Store, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)
@@ -153,6 +160,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS reply_limit INTEGER NOT NULL DEFAULT 30`,
 		`ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS idx_conv_msg_account ON conversation_messages(tenant_id, account_id, created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_conv_msg_daily_reply ON conversation_messages(tenant_id, account_id, created_at) WHERE role='assistant'`,
 	}
 	for _, statement := range migrations {
 		if _, err := s.pool.Exec(ctx, statement); err != nil {
@@ -872,6 +880,41 @@ func (s *Store) SaveMessage( tenantID, accountID, conversationID, customerName, 
 		m.ID, tenantID, accountID, m.ConversationID, m.CustomerName, m.Role, m.Content, m.KnowledgeIDs,
 	).Scan(&m.CreatedAt)
 	if err != nil { return nil, err }
+	return m, nil
+}
+
+// SaveAssistantReply saves a reply only if the account has remaining daily capacity.
+// The account row lock serializes concurrent reply attempts for the same account.
+func (s *Store) SaveAssistantReply(tenantID, accountID, conversationID, customerName, content, knowledgeIDs string) (*model.ConversationMessage, error) {
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil { return nil, err }
+	defer tx.Rollback(ctx)
+
+	var dailyLimit int
+	if err := tx.QueryRow(ctx, `SELECT daily_limit FROM accounts WHERE id=$1 AND tenant_id=$2 FOR UPDATE`, accountID, tenantID).Scan(&dailyLimit); err != nil {
+		return nil, err
+	}
+	if dailyLimit > 0 {
+		var repliesToday int
+		if err := tx.QueryRow(ctx,
+			`SELECT COUNT(*) FROM conversation_messages WHERE tenant_id=$1 AND account_id=$2 AND role='assistant' AND created_at >= date_trunc('day', CURRENT_TIMESTAMP)`,
+			tenantID, accountID,
+		).Scan(&repliesToday); err != nil { return nil, err }
+		if dailyReplyLimitReached(dailyLimit, repliesToday) {
+			return nil, ErrDailyReplyLimitReached
+		}
+	}
+
+	m := &model.ConversationMessage{
+		ID: genID(), ConversationID: conversationID, CustomerName: customerName,
+		Role: "assistant", Content: content, KnowledgeIDs: knowledgeIDs,
+	}
+	if err := tx.QueryRow(ctx,
+		"INSERT INTO conversation_messages (id,tenant_id,account_id,conversation_id,customer_name,role,content,knowledge_ids) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')",
+		m.ID, tenantID, accountID, m.ConversationID, m.CustomerName, m.Role, m.Content, m.KnowledgeIDs,
+	).Scan(&m.CreatedAt); err != nil { return nil, err }
+	if err := tx.Commit(ctx); err != nil { return nil, err }
 	return m, nil
 }
 

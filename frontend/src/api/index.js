@@ -15,6 +15,7 @@ const ERROR_MESSAGES = {
   FORBIDDEN: "当前账号没有执行此操作的权限。",
   TENANT_SUSPENDED: "当前租户已暂停服务。",
   RATE_LIMITED: "操作过于频繁，请稍后重试。",
+  DAILY_LIMIT_REACHED: "今日回复已达到账号上限，请明日再试或调整账号配额。",
   OPENCLAW_ERROR: "OpenClaw 服务异常，请检查 OpenClaw 是否正常运行。",
 };
 

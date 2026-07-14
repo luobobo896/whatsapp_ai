@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -158,8 +159,12 @@ func handleInternalSaveReply(st *store.Store) gin.HandlerFunc {
 			return
 		}
 		if req.KnowledgeIDs == "" { req.KnowledgeIDs = "[]" }
-		msg, err := st.SaveMessage(tenantID, req.AccountID, req.ConversationID, req.CustomerName, "assistant", req.Content, req.KnowledgeIDs)
+		msg, err := st.SaveAssistantReply(tenantID, req.AccountID, req.ConversationID, req.CustomerName, req.Content, req.KnowledgeIDs)
 		if err != nil {
+			if errors.Is(err, store.ErrDailyReplyLimitReached) {
+				c.JSON(http.StatusTooManyRequests, gin.H{"error": model.ErrorDetail{Code: "DAILY_LIMIT_REACHED", Message: "Daily reply limit reached."}})
+				return
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to save reply."}})
 			return
 		}
@@ -333,8 +338,18 @@ func handleSaveMessage(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusNotFound, gin.H{"error": model.ErrorDetail{Code: "NOT_FOUND", Message: "Account not found."}})
 			return
 		}
-		msg, err := st.SaveMessage(session.ActiveTenantID, req.AccountID, req.ConversationID, req.CustomerName, req.Role, req.Content, req.KnowledgeIDs)
+		var msg *model.ConversationMessage
+		var err error
+		if req.Role == "assistant" {
+			msg, err = st.SaveAssistantReply(session.ActiveTenantID, req.AccountID, req.ConversationID, req.CustomerName, req.Content, req.KnowledgeIDs)
+		} else {
+			msg, err = st.SaveMessage(session.ActiveTenantID, req.AccountID, req.ConversationID, req.CustomerName, req.Role, req.Content, req.KnowledgeIDs)
+		}
 		if err != nil {
+			if errors.Is(err, store.ErrDailyReplyLimitReached) {
+				c.JSON(http.StatusTooManyRequests, gin.H{"error": model.ErrorDetail{Code: "DAILY_LIMIT_REACHED", Message: "Daily reply limit reached."}})
+				return
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to save message."}})
 			return
 		}
@@ -359,8 +374,12 @@ func handleSaveReply(st *store.Store) gin.HandlerFunc {
 			return
 		}
 		if req.KnowledgeIDs == "" { req.KnowledgeIDs = "[]" }
-		msg, err := st.SaveMessage(session.ActiveTenantID, req.AccountID, req.ConversationID, req.CustomerName, "assistant", req.Content, req.KnowledgeIDs)
+		msg, err := st.SaveAssistantReply(session.ActiveTenantID, req.AccountID, req.ConversationID, req.CustomerName, req.Content, req.KnowledgeIDs)
 		if err != nil {
+			if errors.Is(err, store.ErrDailyReplyLimitReached) {
+				c.JSON(http.StatusTooManyRequests, gin.H{"error": model.ErrorDetail{Code: "DAILY_LIMIT_REACHED", Message: "Daily reply limit reached."}})
+				return
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to save reply."}})
 			return
 		}

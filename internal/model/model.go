@@ -17,7 +17,7 @@ type CreateTenantRequest struct {
 
 type CreateAccountRequest struct {
 	Name       string   `json:"name"`
-	DailyLimit int      `json:"dailyLimit"`
+	DailyLimit *int     `json:"dailyLimit"`
 	KbID       []string `json:"kbId"`
 	ReplyLimit int      `json:"replyLimit"`
 }

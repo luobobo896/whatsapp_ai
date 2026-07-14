@@ -682,8 +682,13 @@ func handleCreateAccount(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Account name is required."}})
 			return
 		}
-		if req.DailyLimit <= 0 {
-			req.DailyLimit = 30
+		dailyLimit := 30
+		if req.DailyLimit != nil {
+			dailyLimit = *req.DailyLimit
+		}
+		if dailyLimit < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Daily limit cannot be negative."}})
+			return
 		}
 		if req.ReplyLimit <= 0 {
 			req.ReplyLimit = 30
@@ -698,7 +703,7 @@ func handleCreateAccount(st *store.Store) gin.HandlerFunc {
 			return
 		}
 		kbIDJSON := marshalKbIDs(req.KbID)
-		account, err := st.CreateAccount(session.ActiveTenantID, req.Name, kbIDJSON, req.DailyLimit, req.ReplyLimit)
+		account, err := st.CreateAccount(session.ActiveTenantID, req.Name, kbIDJSON, dailyLimit, req.ReplyLimit)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to create account."}})
 			return
@@ -727,8 +732,8 @@ func handleUpdateAccount(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Invalid account status."}})
 			return
 		}
-		if req.DailyLimit != nil && *req.DailyLimit <= 0 || req.ReplyLimit != nil && *req.ReplyLimit <= 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Limits must be positive."}})
+		if req.DailyLimit != nil && *req.DailyLimit < 0 || req.ReplyLimit != nil && *req.ReplyLimit <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Daily limit cannot be negative and reply limit must be positive."}})
 			return
 		}
 		var kbID *string
