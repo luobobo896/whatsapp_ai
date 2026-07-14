@@ -163,7 +163,12 @@ async function selectTenant(tenantId) {
 }
 
 async function signOut() {
-  try { await post("/api/auth/logout", {}, session.value.csrfToken); } catch { /* ok */ }
+  try {
+    await post("/api/auth/logout", {}, session.value.csrfToken);
+  } catch (e) {
+    showToast({ tone: "error", message: messageForError(e) });
+    return;
+  }
   setSession(null);
   router.replace("/login");
 }
@@ -235,7 +240,7 @@ function navigate(v) {
             <span class="user-chip-avatar">{{ (session?.user.displayName || session?.user.email || "").slice(0, 1).toUpperCase() }}</span>
             <span class="user-chip-name">{{ session?.user.displayName || session?.user.email }}</span>
           </span>
-          <el-button type="danger" :icon="LogOut" circle plain @click="signOut" />
+          <el-button type="danger" :icon="LogOut" circle plain aria-label="退出登录" title="退出登录" @click="signOut" />
         </div>
       </header>
 
