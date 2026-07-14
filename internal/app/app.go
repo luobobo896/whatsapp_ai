@@ -9,7 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	web "whatsapp-ai-poc/frontend"
+	"whatsapp-ai-poc/web"
 	"whatsapp-ai-poc/internal/auth"
 	"whatsapp-ai-poc/internal/members"
 	"whatsapp-ai-poc/internal/operations"

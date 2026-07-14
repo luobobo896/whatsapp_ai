@@ -9,23 +9,21 @@ WhatsApp AI 智能客服 — a multi-tenant WhatsApp customer service platform. 
 1. **Go management service** (Gin + pgx) — REST API, serves embedded React frontend
 2. **React/Vite admin dashboard** — tenant/member/account/knowledge-base/conversation management
 
-WhatsApp 消息收发由外部独立组件 OpenClaw 通过 CLI 对接，不在此项目内。项目不应包含 OpenClaw 的配置文件或状态数据。
-
-All project code lives under `whatsapp-ai-poc/`. The root README is a pointer.
+WhatsApp 消息收发由外部独立组件通过 CLI 对接，不在此项目内。
 
 ## Build, Test, and Verify
 
 ```bash
-# Go (run from whatsapp-ai-poc/)
+# Go (run from project root)
 go test ./...                    # all tests (integration tests need Docker)
 go test -race ./...              # race detector
 go test ./internal/platform/config -v   # single package
 go vet ./...
 go build ./cmd/...
 
-# Frontend (run from whatsapp-ai-poc/frontend/)
-pnpm install
-pnpm run build       # regenerate dist/ for Go embed
+# Frontend (run from frontend/)
+cd frontend && pnpm install
+pnpm run build       # outputs to ../web/dist/ for Go embed
 pnpm run dev         # Vite dev server (proxies /api to :8790)
 pnpm run test        # vitest
 pnpm run lint        # eslint
@@ -60,9 +58,9 @@ go run ./cmd/import-legacy --dry-run  # read-only legacy data inventory (no --dr
 go run ./cmd/server             # Go backend on HTTP_HOST:PORT (default :8790)
 ```
 
-The server serves the React SPA from embedded `frontend/dist/`. `GET /health` returns `{"status":"ok","database":"up"}` with no leaked connection details.
+The server serves the React SPA from embedded `web/dist/` (built by `frontend/` into `../web/dist`). `GET /health` returns `{"status":"ok","database":"up"}` with no leaked connection details.
 
-OpenClaw 是外部独立组件，通过 CLI 对接 WhatsApp 消息收发，不在本项目内管理。
+WhatsApp 消息收发由外部独立组件对接，本项目仅负责管理端。
 
 ## Architecture
 
@@ -75,7 +73,7 @@ Browser → Gin router
   │               → tenant RLS context (app.tenant_id)
   │               → handler → service → pgx pool
   ├── /health  → DB ping check
-  └── /*       → embedded SPA (frontend/assets.go, fallback to index.html)
+  └── /*       → embedded SPA (web/embed.go, fallback to index.html)
 ```
 
 ### Key Layers
@@ -108,7 +106,7 @@ All HTTP handlers use `httpx.Adapt(fn)`, converting `func(*gin.Context) error` t
 
 ### Frontend
 
-React 19 + Vite 8. Single-page admin dashboard with dark green sidebar (WhatsApp brand colors: `#128C7E`/`#075E54`/`#25D366`). Styling in `styles.css`, no CSS framework. Components in `components.jsx`, main views in `dashboard.jsx`, API client in `api.js`. Built output in `frontend/dist/` is embedded into the Go binary via `frontend/assets.go` (`//go:embed dist`).
+React 19 + Vite 8. Single-page admin dashboard with dark green sidebar (WhatsApp brand colors: `#128C7E`/`#075E54`/`#25D366`). Styling in `styles.css`, no CSS framework. Components in `components.jsx`, main views in `dashboard.jsx`, API client in `api.js`. Built via `pnpm build` (outputs to `../web/dist/`) and embedded into the Go binary via `web/embed.go` (`//go:embed dist`).
 
 ## API Summary
 

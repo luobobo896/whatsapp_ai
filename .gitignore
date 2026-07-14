@@ -17,5 +17,10 @@ node_modules/
 # Environment
 .env
 
+# Frontend embed target (built from frontend/)
+web/dist/*
+!web/dist/.gitkeep
+
 # Runtime artifacts
 logs/
+data/

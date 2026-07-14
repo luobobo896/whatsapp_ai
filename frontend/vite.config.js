@@ -5,7 +5,7 @@ export default defineConfig({
   plugins: [react()],
   build: {
     emptyOutDir: true,
-    outDir: "dist",
+    outDir: "../web/dist",
   },
   test: {
     environment: "jsdom",
