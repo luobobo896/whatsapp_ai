@@ -35,6 +35,13 @@ type Tenant struct {
 	Status string    `json:"status"`
 }
 
+type AccessibleTenant struct {
+	Tenant
+	Role             members.Role         `json:"role,omitempty"`
+	MembershipStatus string               `json:"membershipStatus,omitempty"`
+	Permissions      []members.Permission `json:"permissions,omitempty"`
+}
+
 type CreateInput struct {
 	Name, Slug, OwnerEmail, OwnerDisplayName string
 }
@@ -46,6 +53,60 @@ type Created struct {
 
 func NewService(pool *pgxpool.Pool, issuer InvitationIssuer) *Service {
 	return &Service{pool: pool, issuer: issuer}
+}
+
+func (s *Service) ListAccessible(ctx context.Context, userID uuid.UUID) ([]AccessibleTenant, string, error) {
+	var platformRole string
+	err := s.pool.QueryRow(ctx, "SELECT role FROM platform_roles WHERE user_id = $1", userID).Scan(&platformRole)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, "", err
+	}
+
+	rows, err := s.pool.Query(ctx, "SELECT id, name, slug, status FROM tenants ORDER BY lower(name), id")
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close()
+	candidates := make([]AccessibleTenant, 0)
+	for rows.Next() {
+		var tenant AccessibleTenant
+		if err := rows.Scan(&tenant.ID, &tenant.Name, &tenant.Slug, &tenant.Status); err != nil {
+			return nil, "", err
+		}
+		candidates = append(candidates, tenant)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	result := make([]AccessibleTenant, 0, len(candidates))
+	for _, candidate := range candidates {
+		access, err := database.WithTenantTx(ctx, s.pool, candidate.ID, func(tx pgx.Tx) (AccessibleTenant, error) {
+			var role members.Role
+			var status string
+			err := tx.QueryRow(ctx, `
+				SELECT role, status FROM tenant_memberships
+				WHERE tenant_id = $1 AND user_id = $2
+			`, candidate.ID, userID).Scan(&role, &status)
+			if err != nil {
+				return AccessibleTenant{}, err
+			}
+			candidate.Role = role
+			candidate.MembershipStatus = status
+			candidate.Permissions = members.PermissionsFor(role)
+			return candidate, nil
+		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			if platformRole == "platform_admin" {
+				result = append(result, candidate)
+			}
+			continue
+		}
+		if err != nil {
+			return nil, "", err
+		}
+		result = append(result, access)
+	}
+	return result, platformRole, nil
 }
 
 func (s *Service) Create(ctx context.Context, actor audit.Actor, input CreateInput) (Created, error) {

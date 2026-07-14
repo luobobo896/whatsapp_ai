@@ -64,6 +64,16 @@ func HasPermission(role Role, permission Permission) bool {
 	return ok
 }
 
+func PermissionsFor(role Role) []Permission {
+	result := make([]Permission, 0, len(rolePermissions[role]))
+	for _, permission := range Permissions {
+		if HasPermission(role, permission) {
+			result = append(result, permission)
+		}
+	}
+	return result
+}
+
 func ValidRole(role Role) bool {
 	_, ok := rolePermissions[role]
 	return ok

@@ -31,14 +31,21 @@ func TestCompletePermissionMatrix(t *testing.T) {
 	}
 
 	for _, role := range []members.Role{members.RoleOwner, members.RoleAdmin, members.RoleAgent, members.RoleViewer} {
+		listed := permissionSet(members.PermissionsFor(role)...)
 		for _, permission := range members.Permissions {
 			if got, want := members.HasPermission(role, permission), expected[role][permission]; got != want {
 				t.Errorf("HasPermission(%q, %q)=%v, want %v", role, permission, got, want)
+			}
+			if listed[permission] != expected[role][permission] {
+				t.Errorf("PermissionsFor(%q) membership for %q=%v, want %v", role, permission, listed[permission], expected[role][permission])
 			}
 		}
 	}
 	if members.HasPermission("unknown", members.PermissionMetricsRead) {
 		t.Fatal("unknown role received a permission")
+	}
+	if len(members.PermissionsFor("unknown")) != 0 {
+		t.Fatal("unknown role received a permission list")
 	}
 }
 

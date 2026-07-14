@@ -18,10 +18,10 @@ type fakePinger struct{ err error }
 
 func (p fakePinger) Ping(context.Context) error { return p.err }
 
-func TestUnknownRouteHasStableErrorAndRequestID(t *testing.T) {
+func TestUnknownAPIRouteHasStableErrorAndRequestID(t *testing.T) {
 	router := app.New(testConfig(), nil, fakePinger{})
 	response := httptest.NewRecorder()
-	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/missing", nil))
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/missing", nil))
 
 	assertAPIError(t, response, http.StatusNotFound, "NOT_FOUND")
 	requestID := response.Header().Get("X-Request-ID")
@@ -30,6 +30,37 @@ func TestUnknownRouteHasStableErrorAndRequestID(t *testing.T) {
 	}
 	if response.Header().Get("X-Content-Type-Options") != "nosniff" {
 		t.Fatal("security headers missing")
+	}
+}
+
+func TestFrontendIndexIsServedAtRootAndClientRoutes(t *testing.T) {
+	router := app.New(testConfig(), nil, fakePinger{})
+	for _, path := range []string{"/", "/login", "/invitations/example/accept"} {
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+
+		if response.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d, want %d; body=%s", path, response.Code, http.StatusOK, response.Body.String())
+		}
+		if !strings.Contains(response.Header().Get("Content-Type"), "text/html") {
+			t.Fatalf("GET %s content type = %q, want HTML", path, response.Header().Get("Content-Type"))
+		}
+		if !strings.Contains(response.Body.String(), `<div id="root"></div>`) {
+			t.Fatalf("GET %s did not serve the frontend shell", path)
+		}
+	}
+}
+
+func TestMissingFrontendAssetDoesNotReturnTheSPAShell(t *testing.T) {
+	router := app.New(testConfig(), nil, fakePinger{})
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/assets/missing.js", nil))
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d; body=%s", response.Code, http.StatusNotFound, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), `<div id="root"></div>`) {
+		t.Fatal("missing asset returned the frontend shell")
 	}
 }
 

@@ -2,7 +2,7 @@
 
 WhatsApp AI commercial MVP 的 Go/PostgreSQL 基础阶段。当前后端提供严格运行配置、checksummed migrations、强制 RLS、服务端会话、CSRF、RBAC、租户/成员生命周期、审计和只读遗留数据盘点。
 
-OpenClaw 消息处理、知识服务、会话流、SSE 和 React 管理端属于后续阶段。`src/` 下的 JavaScript 仅保留为迁移参考，不是运行、测试或部署入口。
+当前管理端使用 React/Vite 独立开发，生产构建产物通过 Go `embed` 打包进服务。`src/` 下的旧 JavaScript 仅保留为迁移参考，不是运行、测试或部署入口。OpenClaw 消息处理、知识服务、会话流和 SSE 仍属于后续阶段。
 
 ## 环境要求
 
@@ -31,7 +31,16 @@ go run ./cmd/import-legacy --dry-run
 go run ./cmd/server
 ```
 
-服务监听 `HTTP_HOST:PORT`。安全健康检查位于 `GET /health`，只返回整体状态与 `database: up|down`。
+服务监听 `HTTP_HOST:PORT`。访问根路径即可打开管理端；前端路由和静态资源由同一个 Go 进程提供。安全健康检查位于 `GET /health`，只返回整体状态与 `database: up|down`。
+
+修改前端后重新生成嵌入产物：
+
+```bash
+pnpm --dir frontend install
+pnpm --dir frontend run build
+```
+
+本地需要独立调试前端时可运行 `pnpm --dir frontend run dev`，Vite 会将 `/api` 和 `/health` 代理到 `127.0.0.1:8790`。此时后端的 `APP_ORIGIN` 需要设为 Vite 地址（默认 `http://localhost:5173`），保证写请求通过 Origin/CSRF 校验。生产和日常启动不需要单独运行前端进程。
 
 ## Foundation API
 
@@ -40,6 +49,7 @@ POST  /api/auth/login
 POST  /api/auth/logout
 GET   /api/auth/me
 POST  /api/auth/select-tenant
+GET   /api/tenants
 
 POST  /api/platform/tenants
 PATCH /api/platform/tenants/:tenantId/status

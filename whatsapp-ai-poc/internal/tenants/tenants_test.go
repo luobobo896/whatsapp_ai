@@ -43,6 +43,26 @@ func TestTenantLifecycle(t *testing.T) {
 	if invitationToken == "" {
 		t.Fatal("tenant creation did not return the owner invitation token")
 	}
+	platformTenants := tenantRequest(t, router, http.MethodGet, "/api/tenants", nil, nil, platformCookie)
+	if platformTenants.Code != http.StatusOK || !strings.Contains(platformTenants.Body.String(), `"platformRole":"platform_admin"`) ||
+		!strings.Contains(platformTenants.Body.String(), `"slug":"acme"`) {
+		t.Fatalf("platform tenant list status=%d body=%s", platformTenants.Code, platformTenants.Body.String())
+	}
+	var platformID uuid.UUID
+	if err := admin.QueryRow(t.Context(), "SELECT user_id FROM platform_roles LIMIT 1").Scan(&platformID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec(t.Context(), `
+		INSERT INTO tenant_memberships (tenant_id, user_id, role, status)
+		VALUES ($1, $2, 'viewer', 'active')
+	`, tenantID, platformID); err != nil {
+		t.Fatal(err)
+	}
+	platformMemberTenants := tenantRequest(t, router, http.MethodGet, "/api/tenants", nil, nil, platformCookie)
+	if platformMemberTenants.Code != http.StatusOK || !strings.Contains(platformMemberTenants.Body.String(), `"role":"viewer"`) ||
+		!strings.Contains(platformMemberTenants.Body.String(), `"metrics:read"`) {
+		t.Fatalf("platform member tenant list status=%d body=%s", platformMemberTenants.Code, platformMemberTenants.Body.String())
+	}
 	var storedHash string
 	if err := admin.QueryRow(t.Context(), "SELECT token_hash FROM member_invitations WHERE tenant_id = $1", tenantID).Scan(&storedHash); err != nil {
 		t.Fatal(err)
@@ -95,6 +115,12 @@ func TestTenantLifecycle(t *testing.T) {
 	}
 	if passwordHashAfter != originalPasswordHash || displayNameAfter != originalDisplayName {
 		t.Fatal("existing-user invitation changed global credentials or profile")
+	}
+	ownerTenants := tenantRequest(t, router, http.MethodGet, "/api/tenants", nil, nil, ownerCookie)
+	if ownerTenants.Code != http.StatusOK || strings.Contains(ownerTenants.Body.String(), `"platformRole":"platform_admin"`) ||
+		!strings.Contains(ownerTenants.Body.String(), `"slug":"acme"`) || !strings.Contains(ownerTenants.Body.String(), `"slug":"second"`) ||
+		!strings.Contains(ownerTenants.Body.String(), `"role":"owner"`) || !strings.Contains(ownerTenants.Body.String(), `"members:manage"`) {
+		t.Fatalf("owner tenant list status=%d body=%s", ownerTenants.Code, ownerTenants.Body.String())
 	}
 
 	selected := tenantRequest(t, router, http.MethodPost, "/api/auth/select-tenant", map[string]any{

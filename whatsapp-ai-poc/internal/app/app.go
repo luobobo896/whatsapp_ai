@@ -3,11 +3,13 @@ package app
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	web "whatsapp-ai-poc/frontend"
 	"whatsapp-ai-poc/internal/auth"
 	"whatsapp-ai-poc/internal/members"
 	"whatsapp-ai-poc/internal/platform/config"
@@ -36,7 +38,15 @@ func New(cfg config.Config, pool *pgxpool.Pool, pinger Pinger) *gin.Engine {
 		tenantService := tenants.NewService(pool, memberService)
 		tenants.RegisterRoutes(router, cfg, pool, tenantService)
 	}
-	router.NoRoute(httpx.Adapt(httpx.NoRoute))
+	frontendHandler := web.Handler()
+	router.NoRoute(func(c *gin.Context) {
+		if (c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead) &&
+			c.Request.URL.Path != "/api" && !strings.HasPrefix(c.Request.URL.Path, "/api/") {
+			frontendHandler.ServeHTTP(c.Writer, c.Request)
+			return
+		}
+		httpx.WriteError(c, httpx.NoRoute(c))
+	})
 	return router
 }
 

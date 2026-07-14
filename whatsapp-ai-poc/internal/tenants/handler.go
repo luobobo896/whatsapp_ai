@@ -19,6 +19,9 @@ type handler struct{ service *Service }
 
 func RegisterRoutes(router *gin.Engine, cfg config.Config, pool *pgxpool.Pool, service *Service) {
 	h := &handler{service: service}
+	router.GET("/api/tenants",
+		auth.Authenticate(pool, cfg.SessionCookieName), httpx.Adapt(h.listAccessible),
+	)
 	router.POST("/api/platform/tenants",
 		auth.Authenticate(pool, cfg.SessionCookieName), auth.RequireMutation(cfg),
 		members.RequirePlatformAdmin(pool), httpx.Adapt(h.create),
@@ -27,6 +30,16 @@ func RegisterRoutes(router *gin.Engine, cfg config.Config, pool *pgxpool.Pool, s
 		auth.Authenticate(pool, cfg.SessionCookieName), auth.RequireMutation(cfg),
 		members.RequirePlatformAdmin(pool), httpx.Adapt(h.setStatus),
 	)
+}
+
+func (h *handler) listAccessible(c *gin.Context) error {
+	identity, _ := auth.IdentityFrom(c)
+	result, platformRole, err := h.service.ListAccessible(c.Request.Context(), identity.UserID)
+	if err != nil {
+		return err
+	}
+	c.JSON(http.StatusOK, gin.H{"tenants": result, "platformRole": platformRole})
+	return nil
 }
 
 func (h *handler) create(c *gin.Context) error {
