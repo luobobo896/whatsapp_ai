@@ -43,7 +43,7 @@ cd cmd/rag-mcp-server && npm install && node index.mjs
 
 访问 `http://localhost:8790`，`GET /health` → `{"status":"ok"}`。
 
-默认管理员：`admin@whatsapp-ai.local` / `admin123456`（环境变量 `ADMIN_EMAIL` / `ADMIN_PASSWORD` 可覆盖）。
+首次启动会创建平台管理员。必须设置 `DATABASE_URL` 与 `ADMIN_PASSWORD`；`ADMIN_EMAIL` 未设置时使用 `admin@whatsapp-ai.local`。
 
 ## 环境变量
 
@@ -51,9 +51,9 @@ cd cmd/rag-mcp-server && npm install && node index.mjs
 |---|---|---|
 | `HTTP_HOST` | `127.0.0.1` | 监听地址 |
 | `PORT` | `8790` | 监听端口 |
-| `DATABASE_URL` | `postgres://admin:aircen123@new.hsddns.com:5432/whatsapp_ai?sslmode=disable` | PostgreSQL 连接串 |
+| `DATABASE_URL` | （必填） | PostgreSQL 连接串 |
 | `ADMIN_EMAIL` | `admin@whatsapp-ai.local` | 种子管理员邮箱 |
-| `ADMIN_PASSWORD` | `admin123456` | 种子管理员密码 |
+| `ADMIN_PASSWORD` | （首次启动必填） | 种子管理员密码 |
 | `INTERNAL_API_TOKEN` | （必填） | 内部 API Bearer token，OpenClaw MCP 服务调用时使用 |
 
 ## API 总览

@@ -2,16 +2,19 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5"
 	"golang.org/x/crypto/bcrypt"
 
 	"whatsapp-ai-poc/internal/handler"
@@ -30,7 +33,10 @@ func main() {
 func run() error {
 	host := env("HTTP_HOST", "127.0.0.1")
 	port := env("PORT", "8790")
-	dbDSN := env("DATABASE_URL", "postgres://admin:aircen123@new.hsddns.com:5432/whatsapp_ai?sslmode=disable")
+	dbDSN, err := requiredEnv("DATABASE_URL")
+	if err != nil {
+		return err
+	}
 
 	ctx := context.Background()
 	st, err := store.Open(ctx, dbDSN)
@@ -141,11 +147,15 @@ func run() error {
 
 func seedPlatformAdmin(st *store.Store) error {
 	email := env("ADMIN_EMAIL", "admin@whatsapp-ai.local")
-	password := env("ADMIN_PASSWORD", "admin123456")
-
 	// Check if admin user already exists
 	if _, err := st.UserByEmail(email); err == nil {
 		return nil // already seeded
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("check existing admin: %w", err)
+	}
+	password, err := requiredEnv("ADMIN_PASSWORD")
+	if err != nil {
+		return fmt.Errorf("seed platform admin: %w", err)
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
@@ -165,4 +175,12 @@ func env(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func requiredEnv(key string) (string, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return "", fmt.Errorf("%s must be set", key)
+	}
+	return value, nil
 }

@@ -52,11 +52,11 @@ cd frontend && pnpm run dev   # Vite :5173，代理 /api → :8790
 
 ## 数据库
 
-PostgreSQL `new.hsddns.com:5432/whatsapp_ai`，账号 `admin` / `aircen123`。
+PostgreSQL 连接串通过必填的 `DATABASE_URL` 环境变量提供。
 
 启动时自动执行 DDL（`CREATE TABLE IF NOT EXISTS`）+ 索引 + pg_trgm 扩展。
 
-管理员种子：`admin@whatsapp-ai.local` / `admin123456`（环境变量可覆盖）。
+管理员种子：首次启动必须提供 `ADMIN_PASSWORD`；`ADMIN_EMAIL` 默认为 `admin@whatsapp-ai.local`。
 
 ### 性能索引
 - `idx_articles_title_trgm` / `idx_articles_content_trgm` — pg_trgm GIN 索引，加速 ILIKE

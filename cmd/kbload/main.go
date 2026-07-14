@@ -56,7 +56,11 @@ func env(k, def string) string {
 }
 
 func main() {
-	dsn := env("KBLOAD_DSN", "postgres://admin:aircen123@new.hsddns.com:5432/whatsapp_ai?sslmode=disable")
+	dsn := env("KBLOAD_DSN", os.Getenv("DATABASE_URL"))
+	if dsn == "" {
+		fmt.Println("KBLOAD_DSN or DATABASE_URL must be set")
+		os.Exit(1)
+	}
 	tenantName := env("KBLOAD_TENANT", "智能客服知识库中心")
 	adminEmail := env("KBLOAD_ADMIN_EMAIL", "admin@whatsapp-ai.local")
 	dir := env("KBLOAD_DIR", "/tmp/kb_seed")
