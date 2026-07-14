@@ -7,7 +7,10 @@ WhatsApp 消息收发由外部 OpenClaw 组件对接，本项目提供管理端 
 ## 项目结构
 
 ```
-├── cmd/server/        # HTTP 服务入口（Gin, graceful shutdown）
+├── cmd/
+│   ├── server/        # HTTP 服务入口（Gin, graceful shutdown）
+│   ├── rag-mcp-server/ # MCP Server（OpenClaw 集成桥接）
+│   └── kbload/        # 知识库数据导入工具
 ├── internal/
 │   ├── model/         # 数据模型
 │   ├── store/         # PostgreSQL 数据访问（pgx/v5, pg_trgm）
@@ -72,5 +75,8 @@ PostgreSQL `new.hsddns.com:5432/whatsapp_ai`，账号 `admin` / `aircen123`。
 
 - `POST /api/knowledge/search` — 向量（Go 余弦相似度）+ ILIKE bigram 回退
 - `POST /api/conversations/query` — 一站式 RAG 接口（保存消息 + 搜索知识 + 加载历史 + 构建 system prompt）
+- `POST /api/internal/conversations/query` — 内部 API（Bearer token），供 MCP Server 调用
+- `DELETE /api/conversations/:id` — 删除会话及消息
 - 文章创建/更新时自动按 500 字符切片到 `knowledge_chunks`
 - system prompt 包含 guardrails：禁止超范围回答
+- MCP Server (`cmd/rag-mcp-server/`) 暴露 `search_knowledge` / `list_accounts` / `save_reply` 三个工具给 OpenClaw Agent
