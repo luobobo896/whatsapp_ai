@@ -2,7 +2,6 @@ package handler
 
 import (
 	"crypto/rand"
-	"fmt"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -72,39 +71,27 @@ func handleListTenants(st *store.Store) gin.HandlerFunc {
 
 func handleCreateTenant(st *store.Store) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		session := middleware.GetSession(c)
+		if session == nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": model.ErrorDetail{Code: "AUTH_REQUIRED", Message: "Authentication is required."}})
+			return
+		}
 		var req model.CreateTenantRequest
 		if err := c.ShouldBindJSON(&req); err != nil || req.Name == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Tenant name is required."}})
 			return
 		}
-		// Create tenant
-		tenant, err := st.CreateTenant(req.Name)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to create tenant."}})
-			return
-		}
-		// Generate admin credentials
+		// Generate admin credentials before creating the tenant transaction.
 		password := randomPassword(16)
 		hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to hash password."}})
 			return
 		}
-		email := fmt.Sprintf("admin@%s.local", tenant.ID[:8])
-		user, err := st.CreateUser(email, "管理员", string(hash), "")
+		tenant, owner, err := st.CreateTenantWithOwner(req.Name, string(hash), session.User.ID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to create admin user."}})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to create tenant."}})
 			return
-		}
-		// Add tenant admin as owner
-		if err := st.AddTenantMember(tenant.ID, user.ID, "owner"); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to add tenant member."}})
-			return
-		}
-		// Also add current platform admin as owner
-		session := middleware.GetSession(c)
-		if session != nil {
-			st.AddTenantMember(tenant.ID, session.User.ID, "owner")
 		}
 
 		resp := model.CreateTenantResponse{
@@ -116,7 +103,7 @@ func handleCreateTenant(st *store.Store) gin.HandlerFunc {
 				Permissions: model.PermissionsForRole("owner"),
 			},
 		}
-		resp.Credentials.Email = email
+		resp.Credentials.Email = owner.Email
 		resp.Credentials.Password = password
 
 		c.JSON(http.StatusOK, resp)

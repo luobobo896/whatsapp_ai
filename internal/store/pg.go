@@ -269,6 +269,54 @@ func (s *Store) CreateTenant( name string) (*model.TenantRow, error) {
 	return t, nil
 }
 
+// CreateTenantWithOwner creates the tenant, its first owner, and the creating
+// platform administrator's membership in one transaction.
+func (s *Store) CreateTenantWithOwner(name, passwordHash, platformAdminID string) (*model.TenantRow, *model.UserRow, error) {
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	tenant := &model.TenantRow{ID: genID(), Name: name, Status: "active"}
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO tenants (id,name) VALUES ($1,$2) RETURNING to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')`,
+		tenant.ID, tenant.Name,
+	).Scan(&tenant.CreatedAt); err != nil {
+		return nil, nil, err
+	}
+
+	owner := &model.UserRow{
+		ID:           genID(),
+		Email:        fmt.Sprintf("admin@%s.local", tenant.ID[:8]),
+		DisplayName:  "管理员",
+		PasswordHash: passwordHash,
+	}
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO users (id,email,display_name,password_hash,platform_role) VALUES ($1,$2,$3,$4,'') RETURNING to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')`,
+		owner.ID, owner.Email, owner.DisplayName, owner.PasswordHash,
+	).Scan(&owner.CreatedAt); err != nil {
+		return nil, nil, err
+	}
+
+	if _, err := tx.Exec(ctx, `INSERT INTO tenant_members (tenant_id,user_id,role,status) VALUES ($1,$2,'owner','active')`, tenant.ID, owner.ID); err != nil {
+		return nil, nil, err
+	}
+	if platformAdminID != "" && platformAdminID != owner.ID {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO tenant_members (tenant_id,user_id,role,status) VALUES ($1,$2,'owner','active') ON CONFLICT (tenant_id,user_id) DO UPDATE SET role='owner', status='active'`,
+			tenant.ID, platformAdminID,
+		); err != nil {
+			return nil, nil, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, nil, err
+	}
+	return tenant, owner, nil
+}
+
 func (s *Store) TenantByID( id string) (*model.TenantRow, error) {
 	t := &model.TenantRow{}
 	err := s.pool.QueryRow(context.Background(),
