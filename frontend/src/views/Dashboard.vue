@@ -1,0 +1,245 @@
+<script setup>
+import { ref, computed, onMounted, watch, inject } from "vue";
+import { useRouter } from "vue-router";
+import {
+  BookOpen, Building2, Headphones, LayoutDashboard,
+  LogOut, MessagesSquare, RefreshCw, Users,
+} from "lucide-vue-next";
+import { APIError, get, messageForError, post } from "../api";
+import { setSession, useSession } from "../composables/useSession";
+import Brand from "../components/Brand.vue";
+import Overview from "./Overview.vue";
+import AccountsView from "./AccountsView.vue";
+import KnowledgeView from "./KnowledgeView.vue";
+import ConversationsView from "./ConversationsView.vue";
+import TenantsView from "./TenantsView.vue";
+import MembersView from "./MembersView.vue";
+import CreateTenantDialog from "../components/CreateTenantDialog.vue";
+import CreateAccountDialog from "../components/CreateAccountDialog.vue";
+import CreateKnowledgeDialog from "../components/CreateKnowledgeDialog.vue";
+import InviteMemberDialog from "../components/InviteMemberDialog.vue";
+import TenantCredentialsResult from "../components/TenantCredentialsResult.vue";
+import InvitationResult from "../components/InvitationResult.vue";
+
+const { session } = useSession();
+const router = useRouter();
+const showToast = inject("showToast");
+
+const NAV_SECTIONS = [
+  {
+    label: "运营中心",
+    items: [
+      { id: "overview", label: "总览", icon: LayoutDashboard },
+      { id: "accounts", label: "客服账号", icon: Headphones },
+      { id: "knowledge", label: "知识库", icon: BookOpen },
+      { id: "conversations", label: "会话", icon: MessagesSquare },
+    ],
+  },
+  {
+    label: "组织管理",
+    items: [
+      { id: "tenants", label: "租户管理", icon: Building2 },
+      { id: "members", label: "成员管理", icon: Users },
+    ],
+  },
+];
+const NAV_ITEMS = NAV_SECTIONS.flatMap((s) => s.items);
+const TENANT_REQUIRED_VIEWS = new Set(["accounts", "knowledge", "conversations", "members"]);
+
+const view = ref("overview");
+const tenants = ref([]);
+const platformRole = ref("");
+const members = ref([]);
+const accounts = ref([]);
+const knowledgeBases = ref([]);
+const conversations = ref([]);
+const health = ref(null);
+const loading = ref(true);
+const selectingTenant = ref(false);
+const refreshVersion = ref(0);
+
+const createTenantOpen = ref(false);
+const createAccountOpen = ref(false);
+const createKnowledgeOpen = ref(false);
+const inviteMemberOpen = ref(false);
+const invitation = ref(null);
+const tenantCredentials = ref(null);
+
+const activeTenant = computed(() =>
+  tenants.value.find((t) => t.id === session.value?.activeTenantId) || null,
+);
+const selectableTenants = computed(() =>
+  tenants.value.filter((t) => t.status === "active" && t.membershipStatus === "active"),
+);
+const canManageMembers = computed(() => activeTenant.value?.permissions?.includes("members:manage") || false);
+const canManageAccounts = computed(() => activeTenant.value?.permissions?.includes("accounts:manage") || false);
+const canManageKnowledge = computed(() => activeTenant.value?.permissions?.includes("knowledge:manage") || false);
+const isPlatformAdmin = computed(() => !!platformRole.value);
+
+onMounted(() => {
+  if (!session.value) { router.replace("/login"); return; }
+  loadData();
+});
+
+watch(refreshVersion, () => loadData());
+
+async function loadData() {
+  loading.value = true;
+  try {
+    const [healthR, tenantR] = await Promise.all([get("/health"), get("/api/tenants")]);
+    health.value = healthR;
+    tenants.value = tenantR.tenants || [];
+    platformRole.value = tenantR.platformRole || "";
+
+    if (session.value?.activeTenantId) {
+      const [memberR, acctR, kbR, convR] = await Promise.all([
+        get("/api/members"),
+        get("/api/accounts"),
+        get("/api/knowledge/bases"),
+        get("/api/conversations"),
+      ]);
+      members.value = memberR.members || [];
+      accounts.value = acctR.accounts || [];
+      knowledgeBases.value = kbR.bases || [];
+      conversations.value = convR.conversations || [];
+    } else {
+      members.value = [];
+      accounts.value = [];
+      knowledgeBases.value = [];
+      conversations.value = [];
+    }
+  } catch (e) {
+    if (e instanceof APIError && e.status === 401) { setSession(null); router.replace("/login"); return; }
+    showToast({ tone: "error", message: messageForError(e) });
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function refresh() {
+  const s = await get("/api/auth/me");
+  setSession(s);
+  loadData();
+}
+
+async function selectTenant(tenantId) {
+  if (selectingTenant.value || !tenantId) return;
+  selectingTenant.value = true;
+  try {
+    await post("/api/auth/select-tenant", { tenantId }, session.value.csrfToken);
+    const s = await get("/api/auth/me");
+    setSession(s);
+    view.value = "overview";
+    showToast({ tone: "success", message: "工作区已切换" });
+    loadData();
+  } catch (e) {
+    showToast({ tone: "error", message: messageForError(e) });
+  } finally {
+    selectingTenant.value = false;
+  }
+}
+
+async function signOut() {
+  try { await post("/api/auth/logout", {}, session.value.csrfToken); } catch { /* ok */ }
+  setSession(null);
+  router.replace("/login");
+}
+
+function navigate(v) {
+  if (TENANT_REQUIRED_VIEWS.has(v) && !session.value?.activeTenantId) {
+    showToast({ tone: "info", message: "请先选择一个租户工作区" });
+    return;
+  }
+  view.value = v;
+}
+</script>
+
+<template>
+  <div class="dashboard-shell">
+    <aside class="dashboard-sidebar">
+      <div style="padding:20px 14px 0">
+        <Brand />
+      </div>
+      <el-menu
+        :default-active="view"
+        background-color="#0d1f17"
+        text-color="#b8c9bf"
+        active-text-color="#fff"
+        style="border-right:0;margin-top:12px"
+        @select="navigate"
+      >
+        <template v-for="section in NAV_SECTIONS" :key="section.label">
+          <el-menu-item-group :title="section.label">
+            <el-menu-item v-for="item in section.items" :key="item.id" :index="item.id">
+              <component :is="item.icon" :size="18" style="margin-right:8px" />
+              <span>{{ item.label }}</span>
+            </el-menu-item>
+          </el-menu-item-group>
+        </template>
+      </el-menu>
+    </aside>
+
+    <div class="dashboard-main">
+      <header class="topbar">
+        <div class="topbar-left">
+          <h2>{{ NAV_ITEMS.find((i) => i.id === view)?.label }}</h2>
+          <p>
+            {{ activeTenant ? activeTenant.name : isPlatformAdmin ? "平台管理空间" : "尚未选择租户工作区" }}
+          </p>
+        </div>
+        <div class="topbar-right">
+          <el-select
+            v-if="selectableTenants.length"
+            :model-value="session?.activeTenantId || ''"
+            placeholder="选择工作区"
+            size="small"
+            style="width:180px"
+            :disabled="selectingTenant"
+            @change="selectTenant"
+          >
+            <el-option value="" disabled label="选择工作区" />
+            <el-option v-for="t in selectableTenants" :key="t.id" :value="t.id" :label="t.name" />
+          </el-select>
+          <el-button :icon="RefreshCw" circle @click="refresh" />
+          <span class="user-chip">
+            <span class="user-chip-avatar">{{ (session?.user.displayName || session?.user.email || "").slice(0, 1).toUpperCase() }}</span>
+            <span class="user-chip-name">{{ session?.user.displayName || session?.user.email }}</span>
+          </span>
+          <el-button type="danger" :icon="LogOut" circle plain @click="signOut" />
+        </div>
+      </header>
+
+      <div class="dashboard-content">
+        <Overview
+          v-if="!loading && view === 'overview'"
+          :health="health" :active-tenant="activeTenant" :tenants="tenants"
+          :accounts="accounts" :knowledge-bases="knowledgeBases" :conversations="conversations"
+          :platform-role="platformRole" @navigate="navigate"
+        />
+        <AccountsView v-if="!loading && view === 'accounts'" :accounts="accounts" :can-manage="canManageAccounts" @create="createAccountOpen = true" />
+        <KnowledgeView v-if="!loading && view === 'knowledge'" :bases="knowledgeBases" :can-manage="canManageKnowledge" @create="createKnowledgeOpen = true" />
+        <ConversationsView v-if="!loading && view === 'conversations'" :conversations="conversations" :accounts="accounts" />
+        <TenantsView
+          v-if="!loading && view === 'tenants'" :tenants="tenants" :platform-role="platformRole"
+          :active-tenant-id="session?.activeTenantId" :csrf-token="session?.csrfToken"
+          @select="selectTenant" @create="createTenantOpen = true" @changed="loadData()"
+        />
+        <MembersView
+          v-if="!loading && view === 'members'" :members="members" :can-manage="canManageMembers"
+          :csrf-token="session?.csrfToken" @invite="inviteMemberOpen = true" @changed="loadData()"
+        />
+      </div>
+    </div>
+
+    <CreateTenantDialog v-if="createTenantOpen" :csrf-token="session?.csrfToken"
+      @close="createTenantOpen = false" @created="(c) => { createTenantOpen = false; tenantCredentials = c; loadData(); }" />
+    <CreateAccountDialog v-if="createAccountOpen" :csrf-token="session?.csrfToken"
+      @close="createAccountOpen = false" @created="() => { createAccountOpen = false; loadData(); }" />
+    <CreateKnowledgeDialog v-if="createKnowledgeOpen" :csrf-token="session?.csrfToken"
+      @close="createKnowledgeOpen = false" @created="() => { createKnowledgeOpen = false; loadData(); }" />
+    <InviteMemberDialog v-if="inviteMemberOpen" :csrf-token="session?.csrfToken"
+      @close="inviteMemberOpen = false" @invited="(i) => { inviteMemberOpen = false; invitation = i.invitation; }" />
+    <TenantCredentialsResult v-if="tenantCredentials" :created="tenantCredentials" @close="tenantCredentials = null" />
+    <InvitationResult v-if="invitation" :invitation="invitation" @close="invitation = null" />
+  </div>
+</template>

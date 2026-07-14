@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { APIError, messageForError, post } from "./api.js";
+import { APIError, messageForError, post } from "./api";
 
 afterEach(() => {
   vi.restoreAllMocks();

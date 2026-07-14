@@ -1,0 +1,281 @@
+/* WhatsApp-branded Element Plus overrides */
+:root {
+  --el-color-primary: #128c7e;
+  --el-color-primary-light-3: #159f8e;
+  --el-color-primary-light-5: #1fc2ae;
+  --el-color-primary-light-7: #7ee5d6;
+  --el-color-primary-light-8: #b2f0e6;
+  --el-color-primary-light-9: #e1f5f0;
+  --el-color-primary-dark-2: #0e7066;
+  --el-color-success: #1fa855;
+  --el-color-warning: #e8a317;
+  --el-color-danger: #d94535;
+  --el-color-info: #6b736d;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  font-family: "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Brand component */
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+.brand-mark {
+  display: grid;
+  flex: 0 0 42px;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border: 1px solid rgba(37, 211, 102, 0.24);
+  border-radius: 8px;
+  background: #152a20;
+  color: #25d366;
+}
+.brand-copy strong {
+  display: block;
+  color: #fff;
+  font-size: 16px;
+  font-weight: 700;
+}
+.brand-copy small {
+  display: block;
+  margin-top: 3px;
+  color: #7a9685;
+  font-size: 11px;
+}
+
+/* Auth layout */
+.auth-layout {
+  display: grid;
+  grid-template-columns: minmax(300px, 38%) 1fr;
+  min-height: 100vh;
+}
+.auth-brand-panel {
+  display: flex;
+  flex-direction: column;
+  padding: clamp(28px, 5vw, 72px);
+  background: #0d1f17;
+}
+.auth-brand-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin: auto 0;
+  padding: 18px 0;
+  border-top: 1px solid rgba(255,255,255,.08);
+  border-bottom: 1px solid rgba(255,255,255,.08);
+  color: #b8c9bf;
+}
+.auth-brand-status > span {
+  display: grid;
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border-radius: 8px;
+  background: #152a20;
+  color: #25d366;
+}
+.auth-brand-status strong {
+  display: block;
+  color: #fff;
+  font-size: 14px;
+}
+.auth-brand-status small {
+  display: block;
+  margin-top: 5px;
+  color: #7a9685;
+  font-size: 12px;
+}
+.auth-footnote {
+  margin: 0;
+  color: #7a9685;
+  font-size: 11px;
+}
+.auth-form-area {
+  display: grid;
+  place-items: center;
+  padding: 32px;
+}
+.auth-form {
+  width: min(100%, 390px);
+}
+.auth-form-header {
+  margin-bottom: 24px;
+}
+.auth-form-header h1 {
+  margin: 0;
+  font-size: 28px;
+  line-height: 1.2;
+}
+.auth-form-header p {
+  margin: 8px 0 0;
+  color: #6b736d;
+  font-size: 14px;
+}
+
+/* Invitation page */
+.invitation-layout {
+  min-height: 100vh;
+  padding: 0 24px 64px;
+  background: #f5f7fa;
+}
+.invitation-layout > header {
+  display: flex;
+  height: 72px;
+  align-items: center;
+  margin: 0 -24px;
+  padding: 0 clamp(24px, 5vw, 72px);
+  background: #0d1f17;
+}
+.invitation-form {
+  width: min(100%, 620px);
+  margin: 72px auto 0;
+  padding: 28px;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(13,31,23,.05);
+}
+
+/* Dashboard shell */
+.dashboard-shell {
+  display: flex;
+  min-height: 100vh;
+}
+.dashboard-sidebar {
+  width: 260px;
+  flex-shrink: 0;
+  background: #0d1f17;
+}
+.dashboard-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: #f5f7fa;
+}
+.dashboard-content {
+  flex: 1;
+  padding: 20px 24px 32px;
+}
+
+/* Topbar */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 24px;
+  border-bottom: 1px solid #e2e6e3;
+  background: rgba(255,255,255,.94);
+}
+.topbar-left h2 {
+  margin: 0;
+  font-size: 20px;
+}
+.topbar-left p {
+  margin: 4px 0 0;
+  color: #6b736d;
+  font-size: 12px;
+}
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.user-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 10px 3px 3px;
+  border: 1px solid #e2e6e3;
+  border-radius: 8px;
+  background: #fff;
+}
+.user-chip-avatar {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: 6px;
+  background: #e1f5f0;
+  color: #128c7e;
+  font-size: 12px;
+  font-weight: 750;
+}
+.user-chip-name {
+  max-width: 150px;
+  overflow: hidden;
+  color: #3d403d;
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Metric cards */
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.metric-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 20px;
+}
+.metric-icon {
+  display: grid;
+  flex: 0 0 48px;
+  width: 48px;
+  height: 48px;
+  place-items: center;
+  border-radius: 10px;
+  font-size: 20px;
+}
+.metric-icon-success { background: #e6f7ed; color: #1fa855; }
+.metric-icon-error { background: #fdecea; color: #d94535; }
+.metric-icon-info { background: #e4eff6; color: #2d6a8e; }
+.metric-icon-muted { background: #f9fafb; color: #6b736d; }
+.metric-label { color: #6b736d; font-size: 12px; }
+.metric-value { margin-top: 4px; font-size: 24px; font-weight: 700; }
+.metric-note { margin-top: 2px; color: #949e96; font-size: 11px; }
+
+/* Credential copy field */
+.credential-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.credential-row .el-input {
+  flex: 1;
+}
+
+/* Responsive */
+@media (max-width: 1080px) {
+  .dashboard-sidebar { width: 64px; }
+  .dashboard-sidebar .brand-copy { display: none; }
+  .dashboard-sidebar .el-menu-item span { display: none; }
+  .metric-grid { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 720px) {
+  .auth-layout { grid-template-columns: 1fr; }
+  .auth-brand-panel { min-height: auto; padding: 20px; }
+  .auth-brand-status, .auth-footnote { display: none; }
+  .auth-form-area { min-height: calc(100vh - 82px); place-items: start center; padding: 56px 22px; }
+  .dashboard-sidebar { width: 100%; height: auto; }
+  .dashboard-shell { flex-direction: column; }
+  .dashboard-content { padding: 14px; }
+  .metric-grid { grid-template-columns: 1fr; }
+  .topbar { padding: 10px 14px; }
+  .topbar-left h2 { font-size: 18px; }
+}
