@@ -36,10 +36,12 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 		return nil, fmt.Errorf("connect pg: %w", err)
 	}
 	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
 		return nil, fmt.Errorf("ping pg: %w", err)
 	}
 	s := &Store{pool: pool}
 	if err := s.migrate(ctx); err != nil {
+		pool.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 	return s, nil
@@ -128,32 +130,35 @@ func (s *Store) migrate(ctx context.Context) error {
 		)`,
 	}
 	for _, d := range ddl {
-		if _, err := s.pool.Exec(context.Background(), d); err != nil {
+		if _, err := s.pool.Exec(ctx, d); err != nil {
 			return fmt.Errorf("ddl: %w\n%s", err, d)
 		}
 	}
-	// Extensions
-	s.pool.Exec(context.Background(), `CREATE EXTENSION IF NOT EXISTS pg_trgm`)
-	// Migrations
-	s.pool.Exec(context.Background(), `ALTER TABLE knowledge_articles ADD COLUMN IF NOT EXISTS attributes TEXT NOT NULL DEFAULT '{}'`)
-	// Performance indexes
-	s.pool.Exec(context.Background(), `CREATE INDEX IF NOT EXISTS idx_articles_title_trgm ON knowledge_articles USING GIN (title gin_trgm_ops)`)
-	s.pool.Exec(context.Background(), `CREATE INDEX IF NOT EXISTS idx_articles_content_trgm ON knowledge_articles USING GIN (content gin_trgm_ops)`)
-	s.pool.Exec(context.Background(), `CREATE INDEX IF NOT EXISTS idx_articles_status ON knowledge_articles(status)`)
-	s.pool.Exec(context.Background(), `CREATE INDEX IF NOT EXISTS idx_articles_kbid ON knowledge_articles(knowledge_base_id)`)
-	s.pool.Exec(context.Background(), `CREATE INDEX IF NOT EXISTS idx_kb_tenant_status ON knowledge_bases(tenant_id, status)`)
-	s.pool.Exec(context.Background(), `CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON knowledge_chunks(article_id) WHERE embedding IS NOT NULL`)
-	s.pool.Exec(context.Background(), `ALTER TABLE knowledge_articles ADD COLUMN IF NOT EXISTS search_vector tsvector`)
-	s.pool.Exec(context.Background(), `CREATE INDEX IF NOT EXISTS idx_articles_search ON knowledge_articles USING GIN (search_vector)`)
-	s.pool.Exec(context.Background(), `CREATE OR REPLACE FUNCTION articles_search_update() RETURNS trigger AS $$ BEGIN NEW.search_vector := setweight(to_tsvector('simple', COALESCE(NEW.title, '')), 'A') || setweight(to_tsvector('simple', COALESCE(NEW.content, '')), 'B') || setweight(to_tsvector('simple', COALESCE(NEW.category, '')), 'C') || setweight(to_tsvector('simple', COALESCE(NEW.attributes, '')), 'D'); RETURN NEW; END; $$ LANGUAGE plpgsql`)
-	s.pool.Exec(context.Background(), `DROP TRIGGER IF EXISTS trg_articles_search ON knowledge_articles`)
-	s.pool.Exec(context.Background(), `CREATE TRIGGER trg_articles_search BEFORE INSERT OR UPDATE ON knowledge_articles FOR EACH ROW EXECUTE FUNCTION articles_search_update()`)
-	s.pool.Exec(context.Background(), `UPDATE knowledge_articles SET search_vector = setweight(to_tsvector('simple', COALESCE(title, '')), 'A') || setweight(to_tsvector('simple', COALESCE(content, '')), 'B') || setweight(to_tsvector('simple', COALESCE(category, '')), 'C') || setweight(to_tsvector('simple', COALESCE(attributes, '')), 'D') WHERE search_vector IS NULL`)
-	// Account extensions
-	s.pool.Exec(context.Background(), `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS kb_id TEXT NOT NULL DEFAULT ''`)
-	s.pool.Exec(context.Background(), `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS reply_limit INTEGER NOT NULL DEFAULT 30`)
-		s.pool.Exec(context.Background(), `ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT ''`)
-		s.pool.Exec(context.Background(), `CREATE INDEX IF NOT EXISTS idx_conv_msg_account ON conversation_messages(tenant_id, account_id, created_at)`)
+	migrations := []string{
+		`CREATE EXTENSION IF NOT EXISTS pg_trgm`,
+		`ALTER TABLE knowledge_articles ADD COLUMN IF NOT EXISTS attributes TEXT NOT NULL DEFAULT '{}'`,
+		`CREATE INDEX IF NOT EXISTS idx_articles_title_trgm ON knowledge_articles USING GIN (title gin_trgm_ops)`,
+		`CREATE INDEX IF NOT EXISTS idx_articles_content_trgm ON knowledge_articles USING GIN (content gin_trgm_ops)`,
+		`CREATE INDEX IF NOT EXISTS idx_articles_status ON knowledge_articles(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_articles_kbid ON knowledge_articles(knowledge_base_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_kb_tenant_status ON knowledge_bases(tenant_id, status)`,
+		`CREATE INDEX IF NOT EXISTS idx_chunks_embedding ON knowledge_chunks(article_id) WHERE embedding IS NOT NULL`,
+		`ALTER TABLE knowledge_articles ADD COLUMN IF NOT EXISTS search_vector tsvector`,
+		`CREATE INDEX IF NOT EXISTS idx_articles_search ON knowledge_articles USING GIN (search_vector)`,
+		`CREATE OR REPLACE FUNCTION articles_search_update() RETURNS trigger AS $$ BEGIN NEW.search_vector := setweight(to_tsvector('simple', COALESCE(NEW.title, '')), 'A') || setweight(to_tsvector('simple', COALESCE(NEW.content, '')), 'B') || setweight(to_tsvector('simple', COALESCE(NEW.category, '')), 'C') || setweight(to_tsvector('simple', COALESCE(NEW.attributes, '')), 'D'); RETURN NEW; END; $$ LANGUAGE plpgsql`,
+		`DROP TRIGGER IF EXISTS trg_articles_search ON knowledge_articles`,
+		`CREATE TRIGGER trg_articles_search BEFORE INSERT OR UPDATE ON knowledge_articles FOR EACH ROW EXECUTE FUNCTION articles_search_update()`,
+		`UPDATE knowledge_articles SET search_vector = setweight(to_tsvector('simple', COALESCE(title, '')), 'A') || setweight(to_tsvector('simple', COALESCE(content, '')), 'B') || setweight(to_tsvector('simple', COALESCE(category, '')), 'C') || setweight(to_tsvector('simple', COALESCE(attributes, '')), 'D') WHERE search_vector IS NULL`,
+		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS kb_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS reply_limit INTEGER NOT NULL DEFAULT 30`,
+		`ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT ''`,
+		`CREATE INDEX IF NOT EXISTS idx_conv_msg_account ON conversation_messages(tenant_id, account_id, created_at)`,
+	}
+	for _, statement := range migrations {
+		if _, err := s.pool.Exec(ctx, statement); err != nil {
+			return fmt.Errorf("migration: %w\n%s", err, statement)
+		}
+	}
 	return nil
 }
 
@@ -875,8 +880,26 @@ func (s *Store) UpdateKnowledgeBase( id, tenantID string, name, description, sta
 }
 
 func (s *Store) DeleteKnowledgeBase( id, tenantID string) error {
-	_, err := s.pool.Exec(context.Background(), `DELETE FROM knowledge_bases WHERE id=$1 AND tenant_id=$2`, id, tenantID)
-	return err
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `DELETE FROM knowledge_chunks c USING knowledge_articles a, knowledge_bases k WHERE c.article_id=a.id AND a.knowledge_base_id=k.id AND k.id=$1 AND k.tenant_id=$2`, id, tenantID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM knowledge_articles a USING knowledge_bases k WHERE a.knowledge_base_id=k.id AND k.id=$1 AND k.tenant_id=$2`, id, tenantID); err != nil {
+		return err
+	}
+	command, err := tx.Exec(ctx, `DELETE FROM knowledge_bases WHERE id=$1 AND tenant_id=$2`, id, tenantID)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *Store) ArticlesByKnowledgeBase( kbID, tenantID string) ([]model.KnowledgeArticle, error) {
@@ -936,11 +959,23 @@ func (s *Store) UpdateArticle(id, kbID, tenantID string, title, content, categor
 }
 
 func (s *Store) DeleteArticle(id, kbID, tenantID string) error {
-	command, err := s.pool.Exec(context.Background(), `DELETE FROM knowledge_articles a USING knowledge_bases k WHERE a.id=$1 AND a.knowledge_base_id=$2 AND k.id=a.knowledge_base_id AND k.tenant_id=$3`, id, kbID, tenantID)
-	if err == nil && command.RowsAffected() == 0 {
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `DELETE FROM knowledge_chunks c USING knowledge_articles a, knowledge_bases k WHERE c.article_id=a.id AND a.id=$1 AND a.knowledge_base_id=$2 AND k.id=a.knowledge_base_id AND k.tenant_id=$3`, id, kbID, tenantID); err != nil {
+		return err
+	}
+	command, err := tx.Exec(ctx, `DELETE FROM knowledge_articles a USING knowledge_bases k WHERE a.id=$1 AND a.knowledge_base_id=$2 AND k.id=a.knowledge_base_id AND k.tenant_id=$3`, id, kbID, tenantID)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() == 0 {
 		return pgx.ErrNoRows
 	}
-	return err
+	return tx.Commit(ctx)
 }
 
 

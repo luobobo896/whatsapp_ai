@@ -132,7 +132,11 @@ func handleDeleteBase(st *store.Store) gin.HandlerFunc {
 			return
 		}
 		if err := st.DeleteKnowledgeBase(c.Param("id"), session.ActiveTenantID); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to delete knowledge base."}})
+			if errors.Is(err, pgx.ErrNoRows) {
+				c.JSON(http.StatusNotFound, gin.H{"error": model.ErrorDetail{Code: "NOT_FOUND", Message: "Knowledge base not found."}})
+			} else {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to delete knowledge base."}})
+			}
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"ok": true})
