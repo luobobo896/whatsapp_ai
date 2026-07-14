@@ -167,12 +167,11 @@ func main() {
 					attrs = string(b)
 				}
 			}
-			art, err := st.CreateArticle(kbID, a.Title, a.Content, a.Category, attrs)
+			_, err := st.CreateArticle(kbID, a.Title, a.Content, a.Category, attrs)
 			if err != nil {
 				fmt.Printf("  article err (%s): %v\n", a.Title, err)
 				continue
 			}
-			st.ChunkArticle(art.ID, a.Content)
 			count++
 		}
 		total += count

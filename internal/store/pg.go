@@ -734,23 +734,32 @@ func (s *Store) searchKnowledge(tenantID string, baseIDs []string, query string,
 	return list, rows.Err()
 }
 
-// ChunkArticle splits article content into chunks and stores them.
-func (s *Store) ChunkArticle( articleID, content string) error {
-	s.pool.Exec(context.Background(), "DELETE FROM knowledge_chunks WHERE article_id=$1", articleID)
+func chunkArticleTx(ctx context.Context, tx pgx.Tx, articleID, content string) error {
+	if _, err := tx.Exec(ctx, "DELETE FROM knowledge_chunks WHERE article_id=$1", articleID); err != nil { return err }
 	chunks := splitContent(content, 500)
 	for i, c := range chunks {
-		id := genID()
-		s.pool.Exec(context.Background(),
+		if _, err := tx.Exec(ctx,
 			"INSERT INTO knowledge_chunks (id,article_id,content,chunk_index) VALUES ($1,$2,$3,$4)",
-			id, articleID, c, i)
+			genID(), articleID, c, i); err != nil { return err }
 	}
 	return nil
 }
 
+// ChunkArticle splits article content into chunks and stores them atomically.
+func (s *Store) ChunkArticle(articleID, content string) error {
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil { return err }
+	defer tx.Rollback(ctx)
+	if err := chunkArticleTx(ctx, tx, articleID, content); err != nil { return err }
+	return tx.Commit(ctx)
+}
+
 // UpdateChunkEmbedding sets the embedding vector for a chunk.
 func (s *Store) UpdateChunkEmbedding( chunkID string, embedding []float32) error {
-	b, _ := json.Marshal(embedding)
-	_, err := s.pool.Exec(context.Background(),
+	b, err := json.Marshal(embedding)
+	if err != nil { return err }
+	_, err = s.pool.Exec(context.Background(),
 		"UPDATE knowledge_chunks SET embedding=$1 WHERE id=$2", string(b), chunkID)
 	return err
 }
@@ -979,11 +988,15 @@ func (s *Store) ArticlesByKnowledgeBase( kbID, tenantID string) ([]model.Knowled
 }
 
 func (s *Store) CreateArticle( kbID, title, content, category, attributes string) (*model.KnowledgeArticleRow, error) {
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil { return nil, err }
+	defer tx.Rollback(ctx)
 	a := &model.KnowledgeArticleRow{
 		ID: genID(), KnowledgeBaseID: kbID, Title: title,
 		Content: content, Category: category, Attributes: attributes, Status: "active",
 	}
-	err := s.pool.QueryRow(context.Background(),
+	err = tx.QueryRow(ctx,
 		`INSERT INTO knowledge_articles (id,knowledge_base_id,title,content,category,attributes)
 		 VALUES ($1,$2,$3,$4,$5,$6)
 		 RETURNING to_char(created_at, 'YYYY-MM-DD HH24:MI:SS'),
@@ -991,10 +1004,16 @@ func (s *Store) CreateArticle( kbID, title, content, category, attributes string
 		a.ID, a.KnowledgeBaseID, a.Title, a.Content, a.Category, a.Attributes,
 	).Scan(&a.CreatedAt, &a.UpdatedAt)
 	if err != nil { return nil, err }
+	if err := chunkArticleTx(ctx, tx, a.ID, content); err != nil { return nil, err }
+	if err := tx.Commit(ctx); err != nil { return nil, err }
 	return a, nil
 }
 
 func (s *Store) UpdateArticle(id, kbID, tenantID string, title, content, category, attributes, status *string) (*model.KnowledgeArticleRow, error) {
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil { return nil, err }
+	defer tx.Rollback(ctx)
 	q := `UPDATE knowledge_articles SET updated_at=NOW(), `
 	args := []any{}
 	idx := 1
@@ -1006,8 +1025,12 @@ func (s *Store) UpdateArticle(id, kbID, tenantID string, title, content, categor
 	q = q[:len(q)-2] + fmt.Sprintf(` WHERE id=$%d AND knowledge_base_id=$%d AND EXISTS (SELECT 1 FROM knowledge_bases WHERE id=$%d AND tenant_id=$%d) RETURNING id,knowledge_base_id,title,content,category,attributes,status,to_char(created_at, 'YYYY-MM-DD HH24:MI:SS'),to_char(updated_at, 'YYYY-MM-DD HH24:MI:SS')`, idx, idx+1, idx+1, idx+2)
 	args = append(args, id, kbID, tenantID)
 	a := &model.KnowledgeArticleRow{}
-	err := s.pool.QueryRow(context.Background(), q, args...).Scan(&a.ID, &a.KnowledgeBaseID, &a.Title, &a.Content, &a.Category, &a.Attributes, &a.Status, &a.CreatedAt, &a.UpdatedAt)
+	err = tx.QueryRow(ctx, q, args...).Scan(&a.ID, &a.KnowledgeBaseID, &a.Title, &a.Content, &a.Category, &a.Attributes, &a.Status, &a.CreatedAt, &a.UpdatedAt)
 	if err != nil { return nil, err }
+	if content != nil {
+		if err := chunkArticleTx(ctx, tx, a.ID, *content); err != nil { return nil, err }
+	}
+	if err := tx.Commit(ctx); err != nil { return nil, err }
 	return a, nil
 }
 

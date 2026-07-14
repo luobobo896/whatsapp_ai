@@ -182,7 +182,6 @@ func handleCreateArticle(st *store.Store) gin.HandlerFunc {
 			return
 		}
 		article, err := st.CreateArticle(c.Param("id"), req.Title, req.Content, req.Category, req.Attributes)
-		if err == nil { st.ChunkArticle(article.ID, req.Content) }
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to create article."}})
 			return
@@ -217,7 +216,6 @@ func handleUpdateArticle(st *store.Store) gin.HandlerFunc {
 			return
 		}
 		article, err := st.UpdateArticle(c.Param("articleId"), c.Param("id"), session.ActiveTenantID, req.Title, req.Content, req.Category, req.Attributes, req.Status)
-		if err == nil && req.Content != nil { st.ChunkArticle(article.ID, *req.Content) }
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				c.JSON(http.StatusNotFound, gin.H{"error": model.ErrorDetail{Code: "NOT_FOUND", Message: "Article not found."}})
