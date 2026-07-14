@@ -79,4 +79,4 @@ PostgreSQL 连接串通过必填的 `DATABASE_URL` 环境变量提供。
 - `DELETE /api/conversations/:id` — 删除会话及消息
 - 文章创建/更新时自动按 500 字符切片到 `knowledge_chunks`
 - system prompt 包含 guardrails：禁止超范围回答
-- MCP Server (`cmd/rag-mcp-server/`) 暴露 `search_knowledge` / `list_accounts` / `save_reply` 三个工具给 OpenClaw Agent
+- MCP Server (`cmd/rag-mcp-server/`) 每个 WhatsApp 账号启动一个进程，由 `WHATSAPP_AI_ACCOUNT_ID` 固定绑定账号，并暴露 `search_knowledge` / `save_reply` 两个工具给 OpenClaw Agent

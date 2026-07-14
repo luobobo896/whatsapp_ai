@@ -56,6 +56,7 @@ cd cmd/rag-mcp-server && npm install && node index.mjs
 | `ADMIN_PASSWORD` | （首次启动必填） | 种子管理员密码 |
 | `COOKIE_SECURE` | `true` | 会话 Cookie 的 Secure 属性；本地 HTTP 开发时显式设为 `false` |
 | `INTERNAL_API_TOKEN` | （必填） | 内部 API Bearer token，OpenClaw MCP 服务调用时使用 |
+| `WHATSAPP_AI_ACCOUNT_ID` | （MCP 必填） | RAG MCP 进程绑定的单个 WhatsApp 账号 ID；每个账号单独启动 MCP 进程 |
 
 ## API 总览
 
@@ -107,7 +108,6 @@ cd cmd/rag-mcp-server && npm install && node index.mjs
 |---|---|---|
 | POST | `/api/internal/conversations/query` | RAG 查询（Bearer token 认证） |
 | POST | `/api/internal/conversations/reply` | 保存 AI 回复 |
-| POST | `/api/internal/conversations/accounts/list` | 列出所有客服账号 |
 
 ## RAG 客服系统
 
@@ -121,7 +121,7 @@ WhatsApp 客户 → OpenClaw Gateway → RAG MCP Server → Go 后端 → Postgr
 ```
 
 - **Go 后端**: HTTP API，负责知识搜索、会话管理、消息持久化
-- **RAG MCP Server** (`cmd/rag-mcp-server/index.mjs`): 桥接 OpenClaw Agent 和后端，暴露 MCP 工具 `search_knowledge` / `list_accounts` / `save_reply`
+- **RAG MCP Server** (`cmd/rag-mcp-server/index.mjs`): 每个 WhatsApp 账号单独启动一个进程，桥接 OpenClaw Agent 和后端，暴露 MCP 工具 `search_knowledge` / `save_reply`；账号 ID 从进程环境固定绑定，不能由 Agent 指定。
 - **OpenClaw Agent**: 接收 WhatsApp 消息 → 调 MCP 工具获取 RAG 上下文 → LLM 生成回复 → 发送并调用 `save_reply`
 
 ### 工作流程

@@ -9,7 +9,8 @@
  *
  * Environment:
  *   WHATSAPP_AI_API_URL  – backend base URL (default http://127.0.0.1:8790)
- *   INTERNAL_API_TOKEN   – bearer token for /api/internal routes
+ *   INTERNAL_API_TOKEN       – bearer token for /api/internal routes
+ *   WHATSAPP_AI_ACCOUNT_ID   – the single WhatsApp account this MCP process serves
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -21,9 +22,14 @@ import {
 
 const API_URL = process.env.WHATSAPP_AI_API_URL || "http://127.0.0.1:8790";
 const API_TOKEN = process.env.INTERNAL_API_TOKEN || "";
+const ACCOUNT_ID = process.env.WHATSAPP_AI_ACCOUNT_ID || "";
 
 if (!API_TOKEN) {
   console.error("[rag-mcp] INTERNAL_API_TOKEN is not set – exiting.");
+  process.exit(1);
+}
+if (!ACCOUNT_ID) {
+  console.error("[rag-mcp] WHATSAPP_AI_ACCOUNT_ID is not set – exiting.");
   process.exit(1);
 }
 
@@ -59,8 +65,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       name: "search_knowledge",
       description:
         "搜索 WhatsApp AI 知识库，获取与用户问题相关的知识条目、对话历史和客服回答规则。" +
-        "在回复任何 WhatsApp 消息之前，必须先调用此工具。" +
-        "如果不确定 accountId，可以先调用 list_accounts 获取可用账号列表。",
+        "在回复任何 WhatsApp 消息之前，必须先调用此工具。",
       inputSchema: {
         type: "object",
         properties: {
@@ -72,28 +77,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: "string",
             description: "WhatsApp 会话 ID（通常是用户手机号，如 +8613800000000）",
           },
-          accountId: {
-            type: "string",
-            description:
-              "客服账号 ID。必须先通过 list_accounts 工具获取当前可用账号。",
-          },
           customerName: {
             type: "string",
             description: "客户名称（可选，默认为 conversationId 的值）",
           },
         },
-        required: ["query", "conversationId", "accountId"],
-      },
-    },
-    {
-      name: "list_accounts",
-      description:
-        "列出系统中可用的 WhatsApp 客服账号，返回账号 ID、名称和 OpenClaw 账号 Key。" +
-        "在不确定 accountId 时，先调用此工具获取可用账号。",
-      inputSchema: {
-        type: "object",
-        properties: {},
-        required: [],
+        required: ["query", "conversationId"],
       },
     },
     {
@@ -108,10 +97,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: "string",
             description: "WhatsApp 会话 ID（与 search_knowledge 使用的相同）",
           },
-          accountId: {
-            type: "string",
-            description: "客服账号 ID（与 search_knowledge 使用的相同）",
-          },
           customerName: {
             type: "string",
             description: "客户名称（可选）",
@@ -121,7 +106,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             description: "客服发送的回复内容",
           },
         },
-        required: ["conversationId", "accountId", "content"],
+        required: ["conversationId", "content"],
       },
     },
   ],
@@ -131,11 +116,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
   if (name === "save_reply") {
-    const { conversationId, accountId, customerName, content } = args;
+    const { conversationId, customerName, content } = args;
     try {
       await apiPost("/api/internal/conversations/reply", {
         conversationId,
-        accountId,
+        accountId: ACCOUNT_ID,
         customerName: customerName || conversationId,
         content,
       });
@@ -148,41 +133,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
   }
 
-  if (name === "list_accounts") {
-    try {
-      const data = await apiPost("/api/internal/conversations/accounts/list", {});
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(data.accounts, null, 2),
-          },
-        ],
-      };
-    } catch (err) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `无法获取客服账号: ${err.message}`,
-          },
-        ],
-        isError: true,
-      };
-    }
-  }
-
   if (name !== "search_knowledge") {
     throw new Error(`Unknown tool: ${name}`);
   }
 
-  const { query, conversationId, accountId, customerName } = args;
+  const { query, conversationId, customerName } = args;
 
   try {
     const data = await apiPost("/api/internal/conversations/query", {
       message: query,
       conversationId,
-      accountId,
+      accountId: ACCOUNT_ID,
       customerName: customerName || conversationId,
       maxHistory: 10,
       maxKnowledge: 5,

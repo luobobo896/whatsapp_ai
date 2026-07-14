@@ -41,7 +41,6 @@ func RegisterConversationManagement(r *gin.RouterGroup, st *store.Store) {
 // accountId in the request body rather than from the session.
 func RegisterInternalConversations(r *gin.RouterGroup, st *store.Store) {
 	r.POST("/query", handleInternalConversationQuery(st))
-	r.POST("/accounts/list", handleInternalListAccounts(st))
 	r.POST("/reply", handleInternalSaveReply(st))
 }
 
@@ -169,29 +168,6 @@ func handleInternalSaveReply(st *store.Store) gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, msg)
-	}
-}
-
-func handleInternalListAccounts(st *store.Store) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		rows, err := st.AllAccounts()
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to list accounts."}})
-			return
-		}
-		type accountInfo struct {
-			ID         string `json:"id"`
-			Name       string `json:"name"`
-			AccountKey string `json:"accountKey"`
-			Status     string `json:"status"`
-		}
-		accounts := make([]accountInfo, 0, len(rows))
-		for _, r := range rows {
-			accounts = append(accounts, accountInfo{
-				ID: r.ID, Name: r.Name, AccountKey: r.AccountKey, Status: r.Status,
-			})
-		}
-		c.JSON(http.StatusOK, gin.H{"accounts": accounts})
 	}
 }
 
