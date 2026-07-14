@@ -106,4 +106,26 @@ describe("QrLoginCard", () => {
     expect(wrapper.text()).toContain("连接超时，请重新获取二维码");
     wrapper.unmount();
   });
+
+  it("shows the bridge failure returned by QR status polling", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-14T12:00:00Z"));
+    post.mockResolvedValue({
+      qrData: pngDataUrl,
+      expiresAt: "2026-07-14T12:00:30Z",
+    });
+    get.mockResolvedValue({
+      status: "expired",
+      error: "OpenClaw gateway restart failed",
+    });
+
+    const wrapper = mountCard();
+    await wrapper.find("button").trigger("click");
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(3000);
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("OpenClaw gateway restart failed");
+    wrapper.unmount();
+  });
 });

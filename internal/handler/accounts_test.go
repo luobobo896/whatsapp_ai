@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -56,6 +57,62 @@ func TestQrSessionReportsConnectedAfterScan(t *testing.T) {
 	}, now)
 	if status != "connected" {
 		t.Fatalf("status after connection = %q, want connected", status)
+	}
+}
+
+func TestQrSessionReportsBridgeFailureImmediately(t *testing.T) {
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	session := &qrSession{
+		Status:    "qr_pending",
+		ExpiresAt: now.Add(qrCodeTTL),
+		Err:       fmt.Errorf("OpenClaw login failed"),
+	}
+
+	if status := updateQrSessionStatus(session, channelConnectionStatus{}, now); status != "expired" {
+		t.Fatalf("status after bridge failure = %q, want expired", status)
+	}
+	if !session.CleanupAt.Equal(now) {
+		t.Fatalf("cleanup at = %v, want %v", session.CleanupAt, now)
+	}
+}
+
+func TestEnsureOpenClawAccountConfigPreservesExistingSettings(t *testing.T) {
+	cfg := map[string]any{
+		"channels": map[string]any{
+			"whatsapp": map[string]any{
+				"dmPolicy": "pairing",
+			},
+		},
+	}
+
+	if !ensureOpenClawAccountConfig(cfg, "wa_support") {
+		t.Fatal("expected initial registration to change config")
+	}
+	if ensureOpenClawAccountConfig(cfg, "wa_support") {
+		t.Fatal("duplicate registration changed config")
+	}
+
+	channels := cfg["channels"].(map[string]any)
+	whatsApp := channels["whatsapp"].(map[string]any)
+	if whatsApp["dmPolicy"] != "pairing" {
+		t.Fatalf("dm policy = %v, want pairing", whatsApp["dmPolicy"])
+	}
+	accounts := whatsApp["accounts"].(map[string]any)
+	account, ok := accounts["wa_support"].(map[string]any)
+	if !ok || account["enabled"] != true {
+		t.Fatalf("registered account = %#v", accounts["wa_support"])
+	}
+}
+
+func TestEnsureOpenClawAccountConfigCreatesMissingChannels(t *testing.T) {
+	cfg := map[string]any{}
+	ensureOpenClawAccountConfig(cfg, "wa_support")
+
+	channels := cfg["channels"].(map[string]any)
+	whatsApp := channels["whatsapp"].(map[string]any)
+	accounts := whatsApp["accounts"].(map[string]any)
+	if _, ok := accounts["wa_support"]; !ok {
+		t.Fatal("missing registered account")
 	}
 }
 

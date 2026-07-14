@@ -46,6 +46,7 @@ const (
 	qrConnectionTimeout    = time.Minute
 	qrSessionCleanupWait   = time.Minute
 	openClawRestartWait    = 30 * time.Second
+	openClawCommandTimeout = 10 * time.Second
 	openClawPollInterval   = time.Second
 	channelStatusCacheTTL  = 5 * time.Second
 )
@@ -99,6 +100,11 @@ type openClawChannelStatusPayload struct {
 func updateQrSessionStatus(session *qrSession, channel channelConnectionStatus, now time.Time) string {
 	if session == nil {
 		return ""
+	}
+	if session.Err != nil {
+		session.Status = "expired"
+		session.CleanupAt = now
+		return session.Status
 	}
 	if session.Status == "connected" || channel.Known && channel.Running && channel.Connected {
 		session.Status = "connected"
@@ -189,29 +195,42 @@ func ensureOpenClawAccount(accountKey string) error {
 		return err
 	}
 
-	channels, _ := cfg["channels"].(map[string]any)
-	if channels == nil {
+	if !ensureOpenClawAccountConfig(cfg, accountKey) {
 		return nil
 	}
-	wa, _ := channels["whatsapp"].(map[string]any)
-	if wa == nil {
-		return nil
-	}
-	accounts, _ := wa["accounts"].(map[string]any)
-	if accounts == nil {
-		accounts = map[string]any{}
-		wa["accounts"] = accounts
-	}
-	if _, exists := accounts[accountKey]; exists {
-		return nil // already registered
-	}
-	accounts[accountKey] = map[string]any{"enabled": true}
 
 	updated, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(cfgPath, updated, 0o600)
+}
+
+func ensureOpenClawAccountConfig(cfg map[string]any, accountKey string) bool {
+	changed := false
+	channels, _ := cfg["channels"].(map[string]any)
+	if channels == nil {
+		channels = map[string]any{}
+		cfg["channels"] = channels
+		changed = true
+	}
+	wa, _ := channels["whatsapp"].(map[string]any)
+	if wa == nil {
+		wa = map[string]any{}
+		channels["whatsapp"] = wa
+		changed = true
+	}
+	accounts, _ := wa["accounts"].(map[string]any)
+	if accounts == nil {
+		accounts = map[string]any{}
+		wa["accounts"] = accounts
+		changed = true
+	}
+	if _, exists := accounts[accountKey]; !exists {
+		accounts[accountKey] = map[string]any{"enabled": true}
+		changed = true
+	}
+	return changed
 }
 
 func parseQrBridgeEvent(line []byte) (qrBridgeEvent, error) {
@@ -222,8 +241,14 @@ func parseQrBridgeEvent(line []byte) (qrBridgeEvent, error) {
 	return event, nil
 }
 
+func openClawOutput(timeout time.Duration, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return exec.CommandContext(ctx, "openclaw", args...).Output()
+}
+
 func readWhatsAppChannelStatus(accountKey string) channelConnectionStatus {
-	out, err := exec.Command("openclaw", "channels", "status", "--channel", "whatsapp", "--account", accountKey, "--json").Output()
+	out, err := openClawOutput(openClawCommandTimeout, "channels", "status", "--channel", "whatsapp", "--account", accountKey, "--json")
 	if err != nil {
 		return channelConnectionStatus{}
 	}
@@ -239,7 +264,7 @@ func readAllWhatsAppChannelStatuses() map[string]channelConnectionStatus {
 	}
 	channelStatusCacheMu.Unlock()
 
-	out, err := exec.Command("openclaw", "channels", "status", "--channel", "whatsapp", "--json").Output()
+	out, err := openClawOutput(openClawCommandTimeout, "channels", "status", "--channel", "whatsapp", "--json")
 	if err != nil {
 		return nil
 	}
@@ -385,7 +410,7 @@ func resolveWhatsAppLoginModule() (string, error) {
 		return configured, nil
 	}
 
-	output, err := exec.Command("openclaw", "plugins", "list", "--json").Output()
+	output, err := openClawOutput(openClawCommandTimeout, "plugins", "list", "--json")
 	if err == nil {
 		var payload struct {
 			Plugins []struct {
@@ -581,6 +606,20 @@ func stopQrSession(session *qrSession) {
 	}
 }
 
+func disconnectOpenClawAccount(accountKey string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), openClawCommandTimeout)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "openclaw", "channels", "logout", "--channel", "whatsapp", "--account", accountKey).CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	message := strings.TrimSpace(string(output))
+	if message == "" {
+		message = err.Error()
+	}
+	return fmt.Errorf("断开 OpenClaw WhatsApp 账号失败: %s", message)
+}
+
 func RegisterAccounts(r *gin.RouterGroup, st *store.Store) {
 	r.GET("", handleListAccounts(st))
 	RegisterAccountManagement(r, st)
@@ -717,6 +756,11 @@ func handleQrLogin(st *store.Store) gin.HandlerFunc {
 			return
 		}
 
+		if err := ensureOpenClawAccount(acct.AccountKey); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "OPENCLAW_ERROR", Message: fmt.Sprintf("注册 OpenClaw 账号失败: %v", err)}})
+			return
+		}
+
 		qrCacheMu.Lock()
 		previous := qrCache[accountID]
 		if previous != nil && previous.Status == "starting" {
@@ -727,10 +771,6 @@ func handleQrLogin(st *store.Store) gin.HandlerFunc {
 		qrCache[accountID] = &qrSession{AccountID: accountID, Status: "starting"}
 		qrCacheMu.Unlock()
 		stopQrSession(previous)
-		if acct.AccountKey != "" {
-			_ = ensureOpenClawAccount(acct.AccountKey)
-		}
-
 		qr, err := startQrSession(accountID, acct.AccountKey)
 		qrCacheMu.Lock()
 		if err != nil {
@@ -789,6 +829,9 @@ func handleQrStatus(st *store.Store) gin.HandlerFunc {
 				resp.ExpiresAt = qr.ExpiresAt.Format(time.RFC3339)
 			case "expired":
 				resp.Status = "expired"
+				if qr.Err != nil {
+					resp.Error = qr.Err.Error()
+				}
 				stopQrSession(qr)
 				delete(qrCache, accountID)
 			}
@@ -800,9 +843,15 @@ func handleQrStatus(st *store.Store) gin.HandlerFunc {
 
 		if resp.Status == "connected" {
 			if acct.AccountKey != "" {
-				_ = ensureOpenClawAccount(acct.AccountKey)
+				if err := ensureOpenClawAccount(acct.AccountKey); err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "OPENCLAW_ERROR", Message: fmt.Sprintf("注册 OpenClaw 账号失败: %v", err)}})
+					return
+				}
 			}
-			st.UpdateAccount(session.ActiveTenantID, accountID, "", "connected", nil, nil, nil)
+			if _, err := st.UpdateAccount(session.ActiveTenantID, accountID, "", "connected", nil, nil, nil); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to update account status."}})
+				return
+			}
 		}
 
 		c.JSON(http.StatusOK, resp)
@@ -823,14 +872,20 @@ func handleDisconnect(st *store.Store) gin.HandlerFunc {
 			return
 		}
 
-		exec.Command("openclaw", "channels", "logout", "--channel", "whatsapp", "--account", acct.AccountKey).Run()
+		if err := disconnectOpenClawAccount(acct.AccountKey); err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": model.ErrorDetail{Code: "OPENCLAW_ERROR", Message: err.Error()}})
+			return
+		}
 
 		qrCacheMu.Lock()
 		stopQrSession(qrCache[accountID])
 		delete(qrCache, accountID)
 		qrCacheMu.Unlock()
 
-		st.UpdateAccount(session.ActiveTenantID, accountID, "", "pending", nil, nil, nil)
+		if _, err := st.UpdateAccount(session.ActiveTenantID, accountID, "", "pending", nil, nil, nil); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to update account status."}})
+			return
+		}
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	}
 }

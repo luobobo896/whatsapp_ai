@@ -69,6 +69,7 @@ type AccountStatusResponse struct {
 	ConnectedAt string `json:"connectedAt,omitempty"`
 	QrData      string `json:"qrData,omitempty"`
 	ExpiresAt   string `json:"expiresAt,omitempty"`
+	Error       string `json:"error,omitempty"`
 }
 
 type ErrorDetail struct {

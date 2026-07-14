@@ -75,9 +75,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           accountId: {
             type: "string",
             description:
-              "客服账号 ID。可先通过 list_accounts 工具获取可用账号。" +
-              "已知账号: 2d67edae83a7c5c2f01ffac8 (售前客服/wa_4f1d7885), " +
-              "b48e63266b9888f687f8cf09 (售后客服/wa_68ba1a0c)",
+              "客服账号 ID。必须先通过 list_accounts 工具获取当前可用账号。",
           },
           customerName: {
             type: "string",

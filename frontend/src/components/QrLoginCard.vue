@@ -134,6 +134,10 @@ function startPolling() {
       } else if (resp.status === "connecting") {
         startConnectionWait(resp.expiresAt);
       } else if (resp.status === "expired") {
+        if (resp.error) {
+          errorMsg.value = resp.error;
+          showToast({ tone: "error", message: errorMsg.value });
+        }
         if (status.value === "connecting") {
           expireConnectionWait();
         } else {
@@ -145,7 +149,9 @@ function startPolling() {
           status.value = "expired";
         }
       }
-    } catch { /* ignore */ }
+    } catch (error) {
+      errorMsg.value = messageForError(error);
+    }
   }, 3000);
 }
 
