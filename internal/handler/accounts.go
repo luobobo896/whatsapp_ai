@@ -32,6 +32,7 @@ var qrBridgePath string
 var qrBridgePathErr error
 var openClawConfigMu sync.Mutex
 var openClawGatewayMu sync.Mutex
+var openClawRAGAssetsMu sync.Mutex
 
 var (
 	channelStatusCache   map[string]channelConnectionStatus
@@ -46,6 +47,7 @@ const (
 	qrSessionCleanupWait   = time.Minute
 	openClawRestartWait    = 30 * time.Second
 	openClawCommandTimeout = 10 * time.Second
+	openClawRAGInstallWait = 2 * time.Minute
 	openClawPollInterval   = time.Second
 	channelStatusCacheTTL  = 5 * time.Second
 )
@@ -262,6 +264,336 @@ func ensureOpenClawAccountConfig(cfg map[string]any, accountKey string) bool {
 	return changed
 }
 
+type openClawRAGOptions struct {
+	APIURL    string
+	APIToken  string
+	MCPPath   string
+	Workspace string
+}
+
+func openClawRAGMCPName(accountKey string) string {
+	return "whatsapp-rag-" + accountKey
+}
+
+func openClawRAGAgentID(accountKey string) string {
+	return "whatsapp-rag-" + accountKey
+}
+
+func ensureOpenClawRAGConfig(cfg map[string]any, accountID, accountKey string, options openClawRAGOptions) error {
+	if accountID == "" || accountKey == "" {
+		return errors.New("OpenClaw RAG 账号 ID 和账号键不能为空")
+	}
+	if options.APIURL == "" || options.APIToken == "" || options.MCPPath == "" || options.Workspace == "" {
+		return errors.New("OpenClaw RAG 配置不完整")
+	}
+
+	mcp, _ := cfg["mcp"].(map[string]any)
+	if mcp == nil {
+		mcp = map[string]any{}
+		cfg["mcp"] = mcp
+	}
+	servers, _ := mcp["servers"].(map[string]any)
+	if servers == nil {
+		servers = map[string]any{}
+		mcp["servers"] = servers
+	}
+	mcpName := openClawRAGMCPName(accountKey)
+	servers[mcpName] = map[string]any{
+		"command": "node",
+		"args":    []string{options.MCPPath},
+		"env": map[string]any{
+			"WHATSAPP_AI_API_URL":    options.APIURL,
+			"INTERNAL_API_TOKEN":     options.APIToken,
+			"WHATSAPP_AI_ACCOUNT_ID": accountID,
+		},
+		"toolFilter": map[string]any{"include": []string{"search_knowledge", "save_reply"}},
+	}
+
+	agents, _ := cfg["agents"].(map[string]any)
+	if agents == nil {
+		agents = map[string]any{}
+		cfg["agents"] = agents
+	}
+	agentList, _ := agents["list"].([]any)
+	agentID := openClawRAGAgentID(accountKey)
+	agent := map[string]any{
+		"id":          agentID,
+		"workspace":   filepath.Join(options.Workspace, agentID),
+		"description": "WhatsApp knowledge-base customer service agent",
+		"tools": map[string]any{
+			"profile": "minimal",
+			"allow":   []string{mcpName + "__*"},
+		},
+	}
+	foundAgent := false
+	for i, raw := range agentList {
+		existing, ok := raw.(map[string]any)
+		if ok && existing["id"] == agentID {
+			agentList[i] = agent
+			foundAgent = true
+			break
+		}
+	}
+	if !foundAgent {
+		agentList = append(agentList, agent)
+	}
+	agents["list"] = agentList
+
+	bindings, _ := cfg["bindings"].([]any)
+	binding := map[string]any{
+		"agentId": agentID,
+		"comment": "Managed by WhatsApp AI knowledge-base routing",
+		"match": map[string]any{
+			"channel":   "whatsapp",
+			"accountId": accountKey,
+		},
+		"session": map[string]any{"dmScope": "per-account-channel-peer"},
+	}
+	foundBinding := false
+	for i, raw := range bindings {
+		existing, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		match, _ := existing["match"].(map[string]any)
+		if match["channel"] == "whatsapp" && match["accountId"] == accountKey {
+			if existing["agentId"] != agentID || existing["comment"] != binding["comment"] {
+				return fmt.Errorf("WhatsApp 账号 %s 已绑定到其他 OpenClaw Agent", accountKey)
+			}
+			bindings[i] = binding
+			foundBinding = true
+			break
+		}
+	}
+	if !foundBinding {
+		bindings = append(bindings, binding)
+	}
+	cfg["bindings"] = bindings
+	return nil
+}
+
+func openClawRAGSourceDir() (string, error) {
+	if configured := strings.TrimSpace(os.Getenv("WHATSAPP_AI_RAG_MCP_SOURCE_DIR")); configured != "" {
+		return configured, nil
+	}
+	workingDir, err := os.Getwd()
+	if err == nil {
+		for _, candidate := range []string{
+			filepath.Join(workingDir, "cmd", "rag-mcp-server"),
+			filepath.Join(workingDir, "source", "cmd", "rag-mcp-server"),
+		} {
+			if _, statErr := os.Stat(filepath.Join(candidate, "index.mjs")); statErr == nil {
+				return candidate, nil
+			}
+		}
+	}
+	if executable, executableErr := os.Executable(); executableErr == nil {
+		candidate := filepath.Join(filepath.Dir(executable), "source", "cmd", "rag-mcp-server")
+		if _, statErr := os.Stat(filepath.Join(candidate, "index.mjs")); statErr == nil {
+			return candidate, nil
+		}
+	}
+	return "", errors.New("未找到 RAG MCP 运行文件，请设置 WHATSAPP_AI_RAG_MCP_SOURCE_DIR")
+}
+
+func openClawRAGRuntimeDir(hostDir string) string {
+	if configured := strings.TrimSpace(os.Getenv("OPENCLAW_RAG_MCP_RUNTIME_DIR")); configured != "" {
+		return configured
+	}
+	if openClawDockerContainer() != "" {
+		return "/home/node/.openclaw/whatsapp-rag-mcp"
+	}
+	return hostDir
+}
+
+func openClawRAGWorkspaceDirs(cfgPath string) (string, string) {
+	hostDir := filepath.Join(filepath.Dir(cfgPath), "whatsapp-rag-workspaces")
+	if openClawDockerContainer() != "" {
+		return hostDir, "/home/node/.openclaw/whatsapp-rag-workspaces"
+	}
+	return hostDir, hostDir
+}
+
+func ensureOpenClawDockerOwnership(path string) error {
+	if openClawDockerContainer() == "" {
+		return nil
+	}
+	return os.Chown(path, 1000, 1000)
+}
+
+func copyRAGMCPFile(source, destination string) (bool, error) {
+	data, err := os.ReadFile(source)
+	if err != nil {
+		return false, err
+	}
+	if existing, readErr := os.ReadFile(destination); readErr == nil && bytes.Equal(existing, data) {
+		return false, nil
+	}
+	if err := os.WriteFile(destination, data, 0o644); err != nil {
+		return false, err
+	}
+	if err := ensureOpenClawDockerOwnership(destination); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func ensureOpenClawRAGAssets(cfgPath string) (string, error) {
+	openClawRAGAssetsMu.Lock()
+	defer openClawRAGAssetsMu.Unlock()
+
+	sourceDir, err := openClawRAGSourceDir()
+	if err != nil {
+		return "", err
+	}
+	hostDir := filepath.Join(filepath.Dir(cfgPath), "whatsapp-rag-mcp")
+	if err := os.MkdirAll(hostDir, 0o700); err != nil {
+		return "", err
+	}
+	if err := ensureOpenClawDockerOwnership(hostDir); err != nil {
+		return "", err
+	}
+	changed := false
+	for _, name := range []string{"index.mjs", "package.json", "package-lock.json"} {
+		copied, err := copyRAGMCPFile(filepath.Join(sourceDir, name), filepath.Join(hostDir, name))
+		if err != nil {
+			return "", fmt.Errorf("准备 RAG MCP 文件 %s: %w", name, err)
+		}
+		changed = changed || copied
+	}
+	if _, err := os.Stat(filepath.Join(hostDir, "node_modules")); errors.Is(err, os.ErrNotExist) {
+		changed = true
+	}
+	if changed {
+		ctx, cancel := context.WithTimeout(context.Background(), openClawRAGInstallWait)
+		defer cancel()
+		var command *exec.Cmd
+		runtimeDir := openClawRAGRuntimeDir(hostDir)
+		if container := openClawDockerContainer(); container != "" {
+			command = exec.CommandContext(ctx, "docker", "exec", container, "npm", "ci", "--omit=dev", "--prefix", runtimeDir)
+		} else {
+			command = exec.CommandContext(ctx, "npm", "ci", "--omit=dev", "--prefix", hostDir)
+		}
+		if output, err := command.CombinedOutput(); err != nil {
+			return "", fmt.Errorf("安装 RAG MCP 依赖失败: %s", strings.TrimSpace(string(output)))
+		}
+	}
+	return openClawRAGRuntimeDir(hostDir), nil
+}
+
+func writeOpenClawRAGWorkspace(workspaceDir, accountKey string) error {
+	agentDir := filepath.Join(workspaceDir, openClawRAGAgentID(accountKey))
+	if err := os.MkdirAll(agentDir, 0o700); err != nil {
+		return err
+	}
+	if err := ensureOpenClawDockerOwnership(agentDir); err != nil {
+		return err
+	}
+	policyPath := filepath.Join(agentDir, "AGENTS.md")
+	if _, err := os.Stat(policyPath); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	policy := "# WhatsApp Knowledge-Base Reply Policy\n\n" +
+		"For every customer message, call search_knowledge before replying. Use only returned knowledge-base content and system instructions. Never answer from general knowledge. If the response begins [DIRECT_REPLY], send its supplied text verbatim. After sending, call save_reply with the exact content.\n"
+	if err := os.WriteFile(policyPath, []byte(policy), 0o600); err != nil {
+		return err
+	}
+	return ensureOpenClawDockerOwnership(policyPath)
+}
+
+func sameOpenClawConfig(data, updated []byte) bool {
+	return bytes.Equal(bytes.TrimSpace(data), updated)
+}
+
+func ensureOpenClawRAGAccount(accountID, accountKey string) (bool, error) {
+	apiToken := strings.TrimSpace(os.Getenv("INTERNAL_API_TOKEN"))
+	if apiToken == "" {
+		return false, errors.New("INTERNAL_API_TOKEN 未配置")
+	}
+	apiURL := strings.TrimSpace(os.Getenv("WHATSAPP_AI_RAG_API_URL"))
+	if apiURL == "" {
+		if openClawDockerContainer() != "" {
+			return false, errors.New("Docker OpenClaw 需要配置 WHATSAPP_AI_RAG_API_URL")
+		}
+		apiURL = "http://127.0.0.1:8790"
+	}
+	cfgPath, err := openClawConfigPath()
+	if err != nil {
+		return false, err
+	}
+	mcpDir, err := ensureOpenClawRAGAssets(cfgPath)
+	if err != nil {
+		return false, err
+	}
+	hostWorkspace, runtimeWorkspace := openClawRAGWorkspaceDirs(cfgPath)
+	if err := writeOpenClawRAGWorkspace(hostWorkspace, accountKey); err != nil {
+		return false, fmt.Errorf("准备 OpenClaw RAG 工作区: %w", err)
+	}
+
+	openClawConfigMu.Lock()
+	defer openClawConfigMu.Unlock()
+	data, err := os.ReadFile(cfgPath)
+	if err != nil && !os.IsNotExist(err) {
+		return false, err
+	}
+	var cfg map[string]any
+	if len(data) == 0 {
+		cfg = map[string]any{}
+	} else if err := json.Unmarshal(data, &cfg); err != nil {
+		return false, err
+	}
+	if err := ensureOpenClawRAGConfig(cfg, accountID, accountKey, openClawRAGOptions{
+		APIURL: apiURL, APIToken: apiToken, MCPPath: filepath.Join(mcpDir, "index.mjs"), Workspace: runtimeWorkspace,
+	}); err != nil {
+		return false, err
+	}
+	updated, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return false, err
+	}
+	if sameOpenClawConfig(data, updated) {
+		return false, nil
+	}
+	if err := os.WriteFile(cfgPath, updated, 0o600); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// SyncOpenClawRAGAccounts configures every connected WhatsApp account after a
+// service restart so existing accounts receive the same per-account RAG route
+// as newly scanned accounts.
+func SyncOpenClawRAGAccounts(st *store.Store) error {
+	if !isOpenClawAvailable() {
+		return nil
+	}
+	accounts, err := st.AllAccounts()
+	if err != nil {
+		return err
+	}
+	changed := false
+	var syncErrors []error
+	for _, account := range accounts {
+		if account.Status == "disabled" {
+			continue
+		}
+		accountChanged, err := ensureOpenClawRAGAccount(account.ID, account.AccountKey)
+		if err != nil {
+			syncErrors = append(syncErrors, fmt.Errorf("配置客服 %s 的知识库路由: %w", account.ID, err))
+			continue
+		}
+		changed = changed || accountChanged
+	}
+	if changed {
+		if err := restartOpenClawGatewaySafely(); err != nil {
+			syncErrors = append(syncErrors, err)
+		}
+	}
+	return errors.Join(syncErrors...)
+}
+
 func parseQrBridgeEvent(line []byte) (qrBridgeEvent, error) {
 	var event qrBridgeEvent
 	if err := json.Unmarshal(bytes.TrimSpace(line), &event); err != nil {
@@ -373,6 +705,12 @@ func restartOpenClawGateway() error {
 	return nil
 }
 
+func restartOpenClawGatewaySafely() error {
+	openClawGatewayMu.Lock()
+	defer openClawGatewayMu.Unlock()
+	return restartOpenClawGateway()
+}
+
 func restartAndWaitForOpenClawAccount(
 	accountKey string,
 	restart func() error,
@@ -395,12 +733,15 @@ func restartAndWaitForOpenClawAccount(
 	return fmt.Errorf("OpenClaw gateway 重启后账号 %s 未连接", accountKey)
 }
 
-func activateOpenClawAccount(accountKey string) error {
+func activateOpenClawAccount(accountID, accountKey string) error {
 	// OpenClaw owns one gateway process. Serializing activation prevents two
 	// completed QR sessions from restarting that shared process concurrently.
 	openClawGatewayMu.Lock()
 	defer openClawGatewayMu.Unlock()
 	if err := ensureOpenClawAccount(accountKey); err != nil {
+		return err
+	}
+	if _, err := ensureOpenClawRAGAccount(accountID, accountKey); err != nil {
 		return err
 	}
 	attempts := int(openClawRestartWait / openClawPollInterval)
@@ -616,7 +957,7 @@ func monitorQrSession(session *qrSession, events <-chan qrBridgeEvent, stderr *b
 	}
 	waitErr := session.Cmd.Wait()
 	if bridgeConnected && waitErr == nil {
-		activationErr := activateOpenClawAccount(session.AccountKey)
+		activationErr := activateOpenClawAccount(session.AccountID, session.AccountKey)
 		qrCacheMu.Lock()
 		if current, ok := qrCache[session.AccountID]; ok && current == session {
 			if activationErr != nil {
@@ -870,6 +1211,17 @@ func handleQrLogin(st *store.Store) gin.HandlerFunc {
 		}
 		live := readWhatsAppChannelStatus(acct.AccountKey)
 		if live.Known && live.Running && live.Connected {
+			changed, err := ensureOpenClawRAGAccount(acct.ID, acct.AccountKey)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "OPENCLAW_ERROR", Message: fmt.Sprintf("配置知识库客服失败: %v", err)}})
+				return
+			}
+			if changed {
+				if err := restartOpenClawGatewaySafely(); err != nil {
+					c.JSON(http.StatusBadGateway, gin.H{"error": model.ErrorDetail{Code: "OPENCLAW_ERROR", Message: err.Error()}})
+					return
+				}
+			}
 			if _, err := st.UpdateAccount(session.ActiveTenantID, accountID, "", "connected", nil, nil, nil); err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to update account status."}})
 				return
@@ -967,6 +1319,17 @@ func handleQrStatus(st *store.Store) gin.HandlerFunc {
 			if acct.AccountKey != "" {
 				if err := ensureOpenClawAccount(acct.AccountKey); err != nil {
 					c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "OPENCLAW_ERROR", Message: fmt.Sprintf("注册 OpenClaw 账号失败: %v", err)}})
+					return
+				}
+			}
+			changed, err := ensureOpenClawRAGAccount(acct.ID, acct.AccountKey)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "OPENCLAW_ERROR", Message: fmt.Sprintf("配置知识库客服失败: %v", err)}})
+				return
+			}
+			if changed {
+				if err := restartOpenClawGatewaySafely(); err != nil {
+					c.JSON(http.StatusBadGateway, gin.H{"error": model.ErrorDetail{Code: "OPENCLAW_ERROR", Message: err.Error()}})
 					return
 				}
 			}

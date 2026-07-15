@@ -119,6 +119,71 @@ func TestEnsureOpenClawAccountConfigCreatesMissingChannels(t *testing.T) {
 	}
 }
 
+func TestEnsureOpenClawRAGConfigCreatesIsolatedMCPAndRoutePerAccount(t *testing.T) {
+	cfg := map[string]any{}
+	options := openClawRAGOptions{
+		APIURL:    "https://whatsapp.example.com",
+		APIToken:  "test-token",
+		MCPPath:   "/home/node/.openclaw/whatsapp-rag-mcp/index.mjs",
+		Workspace: "/home/node/.openclaw/workspaces",
+	}
+
+	if err := ensureOpenClawRAGConfig(cfg, "account-sales", "wa_sales", options); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureOpenClawRAGConfig(cfg, "account-support", "wa_support", options); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureOpenClawRAGConfig(cfg, "account-sales", "wa_sales", options); err != nil {
+		t.Fatal(err)
+	}
+
+	servers := cfg["mcp"].(map[string]any)["servers"].(map[string]any)
+	sales := servers[openClawRAGMCPName("wa_sales")].(map[string]any)
+	support := servers[openClawRAGMCPName("wa_support")].(map[string]any)
+	if sales["env"].(map[string]any)["WHATSAPP_AI_ACCOUNT_ID"] != "account-sales" {
+		t.Fatalf("sales MCP account ID = %#v", sales["env"])
+	}
+	if support["env"].(map[string]any)["WHATSAPP_AI_ACCOUNT_ID"] != "account-support" {
+		t.Fatalf("support MCP account ID = %#v", support["env"])
+	}
+
+	bindings := cfg["bindings"].([]any)
+	if len(bindings) != 2 {
+		t.Fatalf("bindings = %#v, want two account routes", bindings)
+	}
+	for _, raw := range bindings {
+		binding := raw.(map[string]any)
+		match := binding["match"].(map[string]any)
+		if match["channel"] != "whatsapp" || match["accountId"] == "" {
+			t.Fatalf("binding = %#v, want WhatsApp account route", binding)
+		}
+		if binding["agentId"] != openClawRAGAgentID(match["accountId"].(string)) {
+			t.Fatalf("binding = %#v, want matching per-account agent", binding)
+		}
+	}
+
+	agents := cfg["agents"].(map[string]any)["list"].([]any)
+	if len(agents) != 2 {
+		t.Fatalf("agents = %#v, want one agent per account", agents)
+	}
+	for _, raw := range agents {
+		agent := raw.(map[string]any)
+		tools := agent["tools"].(map[string]any)
+		allow := tools["allow"].([]string)
+		if len(allow) != 1 || allow[0] != agent["id"].(string)+"__*" {
+			t.Fatalf("agent tool policy = %#v, want only its own MCP tools", tools)
+		}
+	}
+}
+
+func TestSameOpenClawConfigIgnoresTrailingNewline(t *testing.T) {
+	config := []byte("{\n  \"mcp\": {}\n}")
+	if !sameOpenClawConfig(append(config, '\n'), config) {
+		t.Fatal("trailing newline must not trigger an OpenClaw gateway restart")
+	}
+}
+
 func TestOpenClawCommandSpecUsesConfiguredDockerContainer(t *testing.T) {
 	t.Setenv("OPENCLAW_DOCKER_CONTAINER", "openclaw")
 	command, args := openClawCommandSpec("channels", "status", "--json")
