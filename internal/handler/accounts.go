@@ -34,12 +34,6 @@ var openClawConfigMu sync.Mutex
 var openClawGatewayMu sync.Mutex
 
 var (
-	openClawAvailable   bool
-	openClawAvailableMu sync.Mutex
-	openClawChecked     bool
-)
-
-var (
 	channelStatusCache   map[string]channelConnectionStatus
 	channelStatusCacheAt time.Time
 	channelStatusCacheMu sync.Mutex
@@ -166,14 +160,32 @@ func init() {
 }
 
 func isOpenClawAvailable() bool {
-	openClawAvailableMu.Lock()
-	defer openClawAvailableMu.Unlock()
-	if !openClawChecked {
-		_, err := exec.LookPath("openclaw")
-		openClawAvailable = err == nil
-		openClawChecked = true
+	command, _ := openClawCommandSpec()
+	_, err := exec.LookPath(command)
+	return err == nil
+}
+
+func openClawDockerContainer() string {
+	return strings.TrimSpace(os.Getenv("OPENCLAW_DOCKER_CONTAINER"))
+}
+
+func openClawCommandSpec(args ...string) (string, []string) {
+	if container := openClawDockerContainer(); container != "" {
+		return "docker", append([]string{"exec", container, "openclaw"}, args...)
 	}
-	return openClawAvailable
+	return "openclaw", args
+}
+
+func openClawBridgeCommandSpec(modulePath, accountKey string) (string, []string) {
+	if container := openClawDockerContainer(); container != "" {
+		return "docker", []string{"exec", "-i", container, "node", "--input-type=module", "-", modulePath, accountKey}
+	}
+	return "node", []string{modulePath, accountKey}
+}
+
+func openClawCommand(ctx context.Context, args ...string) *exec.Cmd {
+	command, commandArgs := openClawCommandSpec(args...)
+	return exec.CommandContext(ctx, command, commandArgs...)
 }
 
 func openClawConfigPath() (string, error) {
@@ -261,7 +273,7 @@ func parseQrBridgeEvent(line []byte) (qrBridgeEvent, error) {
 func openClawOutput(timeout time.Duration, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	return exec.CommandContext(ctx, "openclaw", args...).Output()
+	return openClawCommand(ctx, args...).Output()
 }
 
 func readWhatsAppChannelStatus(accountKey string) channelConnectionStatus {
@@ -350,7 +362,7 @@ func parseWhatsAppChannelStatus(data []byte, accountKey string) channelConnectio
 func restartOpenClawGateway() error {
 	ctx, cancel := context.WithTimeout(context.Background(), openClawRestartWait)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, "openclaw", "gateway", "restart").CombinedOutput()
+	output, err := openClawCommand(ctx, "gateway", "restart").CombinedOutput()
 	if err != nil {
 		message := strings.TrimSpace(string(output))
 		if message == "" {
@@ -429,6 +441,9 @@ func accountsForLiveStatusSync(accounts []model.Account) []model.Account {
 
 func resolveWhatsAppLoginModule() (string, error) {
 	if configured := strings.TrimSpace(os.Getenv("OPENCLAW_WHATSAPP_LOGIN_MODULE")); configured != "" {
+		if openClawDockerContainer() != "" {
+			return configured, nil
+		}
 		if _, err := os.Stat(configured); err != nil {
 			return "", fmt.Errorf("OpenClaw WhatsApp 登录模块不存在: %w", err)
 		}
@@ -455,6 +470,9 @@ func resolveWhatsAppLoginModule() (string, error) {
 				}
 				if root != "" {
 					module := filepath.Join(root, "dist", "login-qr-runtime.js")
+					if openClawDockerContainer() != "" {
+						return module, nil
+					}
 					if _, statErr := os.Stat(module); statErr == nil {
 						return module, nil
 					}
@@ -504,12 +522,17 @@ func startQrSession(accountID, accountKey string) (*qrSession, error) {
 	if err != nil {
 		return nil, err
 	}
-	bridgePath, err := qrBridgeScriptPath()
-	if err != nil {
-		return nil, fmt.Errorf("创建二维码桥接脚本失败: %w", err)
+	command, commandArgs := openClawBridgeCommandSpec(modulePath, accountKey)
+	cmd := exec.Command(command, commandArgs...)
+	if openClawDockerContainer() != "" {
+		cmd.Stdin = bytes.NewReader(whatsappQrBridgeScript)
+	} else {
+		bridgePath, err := qrBridgeScriptPath()
+		if err != nil {
+			return nil, fmt.Errorf("创建二维码桥接脚本失败: %w", err)
+		}
+		cmd = exec.Command(command, append([]string{bridgePath}, commandArgs...)...)
 	}
-
-	cmd := exec.Command("node", bridgePath, modulePath, accountKey)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -634,7 +657,7 @@ func stopQrSession(session *qrSession) {
 func disconnectOpenClawAccount(accountKey string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), openClawCommandTimeout)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, "openclaw", "channels", "logout", "--channel", "whatsapp", "--account", accountKey).CombinedOutput()
+	output, err := openClawCommand(ctx, "channels", "logout", "--channel", "whatsapp", "--account", accountKey).CombinedOutput()
 	if err == nil {
 		return nil
 	}
@@ -670,8 +693,8 @@ func sendOpenClawWhatsAppMessage(accountKey, conversationID, content string) err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx,
-		"openclaw", "message", "send",
+	output, err := openClawCommand(ctx,
+		"message", "send",
 		"--channel", "whatsapp",
 		"--account", accountKey,
 		"--target", target,

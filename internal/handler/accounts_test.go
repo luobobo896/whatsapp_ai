@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -115,6 +116,45 @@ func TestEnsureOpenClawAccountConfigCreatesMissingChannels(t *testing.T) {
 	accounts := whatsApp["accounts"].(map[string]any)
 	if _, ok := accounts["wa_support"]; !ok {
 		t.Fatal("missing registered account")
+	}
+}
+
+func TestOpenClawCommandSpecUsesConfiguredDockerContainer(t *testing.T) {
+	t.Setenv("OPENCLAW_DOCKER_CONTAINER", "openclaw")
+	command, args := openClawCommandSpec("channels", "status", "--json")
+
+	if command != "docker" {
+		t.Fatalf("command = %q, want docker", command)
+	}
+	want := []string{"exec", "openclaw", "openclaw", "channels", "status", "--json"}
+	if !slices.Equal(args, want) {
+		t.Fatalf("args = %#v, want %#v", args, want)
+	}
+}
+
+func TestOpenClawCommandSpecDefaultsToHostCLI(t *testing.T) {
+	t.Setenv("OPENCLAW_DOCKER_CONTAINER", "")
+	command, args := openClawCommandSpec("channels", "status", "--json")
+
+	if command != "openclaw" {
+		t.Fatalf("command = %q, want openclaw", command)
+	}
+	want := []string{"channels", "status", "--json"}
+	if !slices.Equal(args, want) {
+		t.Fatalf("args = %#v, want %#v", args, want)
+	}
+}
+
+func TestOpenClawBridgeCommandSpecUsesConfiguredDockerContainer(t *testing.T) {
+	t.Setenv("OPENCLAW_DOCKER_CONTAINER", "openclaw")
+	command, args := openClawBridgeCommandSpec("/home/node/login-qr-runtime.js", "wa_support")
+
+	if command != "docker" {
+		t.Fatalf("command = %q, want docker", command)
+	}
+	want := []string{"exec", "-i", "openclaw", "node", "--input-type=module", "-", "/home/node/login-qr-runtime.js", "wa_support"}
+	if !slices.Equal(args, want) {
+		t.Fatalf("args = %#v, want %#v", args, want)
 	}
 }
 
