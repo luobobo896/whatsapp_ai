@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -823,7 +824,6 @@ func (s *Store) searchKnowledge(tenantID string, baseIDs []string, query string,
 		return []model.SearchResultItem{}, nil
 	}
 	scoreParts := make([]string, len(words))
-	likeParts := make([]string, len(words))
 	args := []any{tenantID, limit}
 	baseFilter := ""
 	argIdx := 3
@@ -836,10 +836,14 @@ func (s *Store) searchKnowledge(tenantID string, baseIDs []string, query string,
 		p := fmt.Sprintf("$%d", argIdx)
 		argIdx++
 		scoreParts[i] = fmt.Sprintf("(CASE WHEN a.title ILIKE '%%%%' || %s || '%%%%' THEN 3 WHEN a.content ILIKE '%%%%' || %s || '%%%%' THEN 2 WHEN a.category ILIKE '%%%%' || %s || '%%%%' THEN 2 WHEN a.attributes ILIKE '%%%%' || %s || '%%%%' THEN 1 ELSE 0 END)", p, p, p, p)
-		likeParts[i] = fmt.Sprintf("(a.title ILIKE '%%%%' || %s || '%%%%' OR a.content ILIKE '%%%%' || %s || '%%%%' OR a.category ILIKE '%%%%' || %s || '%%%%' OR a.attributes ILIKE '%%%%' || %s || '%%%%')", p, p, p, p)
 		args = append(args, w)
 	}
-	sql := fmt.Sprintf("SELECT a.id, a.title, a.content, a.category, a.attributes, k.name AS kb_name, (%s) AS score FROM knowledge_articles a JOIN knowledge_bases k ON a.knowledge_base_id = k.id WHERE k.tenant_id=$1 AND a.status='active' AND k.status='active'%s AND (%s) ORDER BY score DESC LIMIT $2", strings.Join(scoreParts, " + "), baseFilter, strings.Join(likeParts, " OR "))
+	minimumScore := 2
+	if len(words) > 1 {
+		minimumScore = 4
+	}
+	scoreExpression := strings.Join(scoreParts, " + ")
+	sql := fmt.Sprintf("SELECT a.id, a.title, a.content, a.category, a.attributes, k.name AS kb_name, (%s) AS score FROM knowledge_articles a JOIN knowledge_bases k ON a.knowledge_base_id = k.id WHERE k.tenant_id=$1 AND a.status='active' AND k.status='active'%s AND ((%s) >= %d) ORDER BY score DESC LIMIT $2", scoreExpression, baseFilter, scoreExpression, minimumScore)
 	rows, err := s.pool.Query(context.Background(), sql, args...)
 	if err != nil {
 		return nil, err
@@ -954,7 +958,14 @@ func splitQuery(q string) []string {
 		}
 		// For Chinese text (>2 chars), add bigrams for fuzzy matching.
 		runes := []rune(p)
-		if len(runes) > 2 {
+		hasHan := false
+		for _, r := range runes {
+			if unicode.Is(unicode.Han, r) {
+				hasHan = true
+				break
+			}
+		}
+		if len(runes) > 2 && hasHan {
 			for i := 0; i < len(runes)-1; i++ {
 				bigram := string(runes[i : i+2])
 				if !seen[bigram] {

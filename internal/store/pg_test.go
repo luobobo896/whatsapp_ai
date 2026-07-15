@@ -13,6 +13,14 @@ func TestSplitQueryAddsBigramsWithoutSingletonNoise(t *testing.T) {
 	}
 }
 
+func TestSplitQueryDoesNotCreateBigramsForEnglishWords(t *testing.T) {
+	got := splitQuery("return policy")
+	want := []string{"return", "policy"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("splitQuery() = %#v, want %#v", got, want)
+	}
+}
+
 func TestDailyReplyLimitReached(t *testing.T) {
 	tests := []struct {
 		name  string

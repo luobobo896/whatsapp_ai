@@ -85,11 +85,6 @@ type channelConnectionStatus struct {
 }
 
 type openClawChannelStatusPayload struct {
-	Channels map[string]struct {
-		Linked    bool `json:"linked"`
-		Running   bool `json:"running"`
-		Connected bool `json:"connected"`
-	} `json:"channels"`
 	ChannelAccounts map[string][]struct {
 		AccountID string `json:"accountId"`
 		Linked    bool   `json:"linked"`
@@ -800,16 +795,7 @@ func parseWhatsAppChannelStatus(data []byte, accountKey string) channelConnectio
 			}
 		}
 	}
-	whatsapp, ok := payload.Channels["whatsapp"]
-	if !ok {
-		return channelConnectionStatus{}
-	}
-	return channelConnectionStatus{
-		Known:     true,
-		Linked:    whatsapp.Linked,
-		Running:   whatsapp.Running,
-		Connected: whatsapp.Connected,
-	}
+	return channelConnectionStatus{}
 }
 
 func restartOpenClawGateway() error {

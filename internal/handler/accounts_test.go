@@ -443,6 +443,24 @@ func TestParseWhatsAppChannelStatusUsesRequestedAccount(t *testing.T) {
 	}
 }
 
+func TestParseWhatsAppChannelStatusDoesNotFallbackToDefaultAccount(t *testing.T) {
+	payload := []byte(`{
+  "channels": {
+    "whatsapp": {"linked": true, "running": true, "connected": true}
+  },
+  "channelAccounts": {
+    "whatsapp": [
+      {"accountId": "default", "linked": true, "running": true, "connected": true}
+    ]
+  }
+}`)
+
+	status := parseWhatsAppChannelStatus(payload, "wa_support")
+	if status.Known || status.Linked || status.Running || status.Connected {
+		t.Fatalf("missing account status = %#v, want unknown", status)
+	}
+}
+
 func TestParseQrBridgeEventPreservesPngDataURL(t *testing.T) {
 	event, err := parseQrBridgeEvent([]byte(`{"type":"qr","qrDataUrl":"data:image/png;base64,ZmFrZQ=="}`))
 	if err != nil {
