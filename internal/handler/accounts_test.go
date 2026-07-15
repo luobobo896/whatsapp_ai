@@ -227,6 +227,47 @@ func TestSameOpenClawConfigIgnoresTrailingNewline(t *testing.T) {
 	}
 }
 
+func TestPrepareOpenClawRAGTokenStoresSecretOutsideConfig(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "openclaw.json")
+	path := filepath.Join(filepath.Dir(configPath), ".env")
+	if err := os.WriteFile(path, []byte("OPENCLAW_GATEWAY_TOKEN=existing\nINTERNAL_API_TOKEN=old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	configToken, changed, err := prepareOpenClawRAGToken(configPath, "new-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("token rotation was not reported as a configuration change")
+	}
+	if configToken != internalAPITokenEnvRef {
+		t.Fatalf("config token = %q, want %q", configToken, internalAPITokenEnvRef)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "OPENCLAW_GATEWAY_TOKEN=existing\nINTERNAL_API_TOKEN=\"new-token\"\n"
+	if string(content) != want {
+		t.Fatalf("env content = %q, want %q", content, want)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("env permissions = %o, want 600", info.Mode().Perm())
+	}
+	_, changed, err = prepareOpenClawRAGToken(configPath, "new-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed {
+		t.Fatal("unchanged token was reported as a configuration change")
+	}
+}
+
 func TestWriteOpenClawRAGWorkspaceAddsPolicyToExistingWorkspace(t *testing.T) {
 	workspace := t.TempDir()
 	agentDir := filepath.Join(workspace, openClawRAGAgentID("wa_support"))
@@ -247,6 +288,30 @@ func TestWriteOpenClawRAGWorkspaceAddsPolicyToExistingWorkspace(t *testing.T) {
 	}
 	if !strings.Contains(string(content), "# Existing instructions") || !strings.Contains(string(content), openClawRAGPolicyStart) || !strings.Contains(string(content), "call search_knowledge") {
 		t.Fatalf("workspace policy = %q", content)
+	}
+}
+
+func TestWriteOpenClawRAGWorkspaceRemovesLegacyDuplicatePolicy(t *testing.T) {
+	workspace := t.TempDir()
+	agentDir := filepath.Join(workspace, openClawRAGAgentID("wa_support"))
+	if err := os.MkdirAll(agentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	policyPath := filepath.Join(agentDir, "AGENTS.md")
+	content := openClawRAGPolicyBody() + openClawRAGPolicy()
+	if err := os.WriteFile(policyPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeOpenClawRAGWorkspace(workspace, "wa_support"); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := os.ReadFile(policyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(updated), "# WhatsApp Knowledge-Base Reply Policy") != 1 {
+		t.Fatalf("workspace policy was not deduplicated: %q", updated)
 	}
 }
 
@@ -404,23 +469,6 @@ func TestApplyLiveAccountStatusesClearsStaleConnection(t *testing.T) {
 	}
 	if len(changed) != 1 || changed[0].ID != "account-1" {
 		t.Fatalf("changed accounts = %#v, want account-1", changed)
-	}
-}
-
-func TestAccountStatusSyncUsesIndependentCopy(t *testing.T) {
-	responseAccounts := []model.Account{{
-		ID: "account-1", AccountKey: "wa_support", Status: "connected",
-	}}
-	syncAccounts := accountsForLiveStatusSync(responseAccounts)
-	applyLiveAccountStatuses(syncAccounts, map[string]channelConnectionStatus{
-		"wa_support": {Known: true},
-	})
-
-	if responseAccounts[0].Status != "connected" {
-		t.Fatalf("response status = %q, want connected", responseAccounts[0].Status)
-	}
-	if syncAccounts[0].Status != "pending" {
-		t.Fatalf("sync status = %q, want pending", syncAccounts[0].Status)
 	}
 }
 

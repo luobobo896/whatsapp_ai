@@ -20,3 +20,17 @@ source is discovered from `cmd/rag-mcp-server` in the working tree, or from
 For local `tools/launch-server.sh` usage, the script persists its generated
 internal token in `~/.openclaw/whatsapp-ai.internal-token`. Set
 `INTERNAL_API_TOKEN` before launch to use a managed token instead.
+
+The backend also writes the token to `~/.openclaw/.env` with mode `0600`. Each
+managed MCP definition references `${INTERNAL_API_TOKEN}` instead of storing the
+secret directly in `openclaw.json`.
+
+For a public customer-service number, configure both WhatsApp direct-message
+settings before restarting the gateway:
+
+```sh
+openclaw config set channels.whatsapp.dmPolicy open
+openclaw config set channels.whatsapp.allowFrom '["*"]'
+```
+
+Keep `pairing` instead when every new customer must be approved manually.

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -50,6 +51,7 @@ const (
 	openClawRAGInstallWait = 2 * time.Minute
 	openClawPollInterval   = time.Second
 	channelStatusCacheTTL  = 5 * time.Second
+	internalAPITokenEnvRef = "${INTERNAL_API_TOKEN}"
 )
 
 //go:embed whatsapp_qr_bridge.mjs
@@ -545,10 +547,12 @@ const (
 )
 
 func openClawRAGPolicy() string {
-	return openClawRAGPolicyStart + "\n" +
-		"# WhatsApp Knowledge-Base Reply Policy\n\n" +
-		"For every customer message, call search_knowledge before replying. Use only returned knowledge-base content and system instructions. Never answer from general knowledge. If the response begins [DIRECT_REPLY], send its supplied text verbatim. After sending, call save_reply with the exact content.\n" +
-		openClawRAGPolicyEnd + "\n"
+	return openClawRAGPolicyStart + "\n" + openClawRAGPolicyBody() + openClawRAGPolicyEnd + "\n"
+}
+
+func openClawRAGPolicyBody() string {
+	return "# WhatsApp Knowledge-Base Reply Policy\n\n" +
+		"For every customer message, call search_knowledge before replying. Use only returned knowledge-base content and system instructions. Never answer from general knowledge. If the response begins [DIRECT_REPLY], send its supplied text verbatim. After sending, call save_reply with the exact content.\n"
 }
 
 func writeOpenClawRAGWorkspace(workspaceDir, accountKey string) error {
@@ -572,6 +576,9 @@ func writeOpenClawRAGWorkspace(workspaceDir, accountKey string) error {
 	}
 	policy := openClawRAGPolicy()
 	updated := string(existing)
+	if start := strings.Index(updated, openClawRAGPolicyStart); start >= 0 {
+		updated = strings.ReplaceAll(updated[:start], openClawRAGPolicyBody(), "") + updated[start:]
+	}
 	start := strings.Index(updated, openClawRAGPolicyStart)
 	end := strings.Index(updated, openClawRAGPolicyEnd)
 	if start >= 0 && end >= start {
@@ -595,6 +602,45 @@ func sameOpenClawConfig(data, updated []byte) bool {
 	return bytes.Equal(bytes.TrimSpace(data), updated)
 }
 
+func ensureOpenClawEnvValue(path, key, value string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	entry := key + "=" + strconv.Quote(value)
+	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	found := false
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), key+"=") {
+			lines[i] = entry
+			found = true
+		}
+	}
+	if !found {
+		if len(lines) == 1 && lines[0] == "" {
+			lines[0] = entry
+		} else {
+			lines = append(lines, entry)
+		}
+	}
+	updated := strings.Join(lines, "\n") + "\n"
+	if string(data) == updated {
+		return false, os.Chmod(path, 0o600)
+	}
+	if err := os.WriteFile(path, []byte(updated), 0o600); err != nil {
+		return false, err
+	}
+	return true, os.Chmod(path, 0o600)
+}
+
+func prepareOpenClawRAGToken(cfgPath, apiToken string) (string, bool, error) {
+	changed, err := ensureOpenClawEnvValue(filepath.Join(filepath.Dir(cfgPath), ".env"), "INTERNAL_API_TOKEN", apiToken)
+	if err != nil {
+		return "", false, err
+	}
+	return internalAPITokenEnvRef, changed, nil
+}
+
 func ensureOpenClawRAGAccount(accountID, accountKey string) (bool, error) {
 	apiToken := strings.TrimSpace(os.Getenv("INTERNAL_API_TOKEN"))
 	if apiToken == "" {
@@ -610,6 +656,10 @@ func ensureOpenClawRAGAccount(accountID, accountKey string) (bool, error) {
 	cfgPath, err := openClawConfigPath()
 	if err != nil {
 		return false, err
+	}
+	configToken, tokenChanged, err := prepareOpenClawRAGToken(cfgPath, apiToken)
+	if err != nil {
+		return false, fmt.Errorf("配置 OpenClaw 内部令牌: %w", err)
 	}
 	mcpDir, err := ensureOpenClawRAGAssets(cfgPath)
 	if err != nil {
@@ -633,7 +683,7 @@ func ensureOpenClawRAGAccount(accountID, accountKey string) (bool, error) {
 		return false, err
 	}
 	if err := ensureOpenClawRAGConfig(cfg, accountID, accountKey, openClawRAGOptions{
-		APIURL: apiURL, APIToken: apiToken, MCPPath: filepath.Join(mcpDir, "index.mjs"), Workspace: runtimeWorkspace,
+		APIURL: apiURL, APIToken: configToken, MCPPath: filepath.Join(mcpDir, "index.mjs"), Workspace: runtimeWorkspace,
 	}); err != nil {
 		return false, err
 	}
@@ -642,7 +692,7 @@ func ensureOpenClawRAGAccount(accountID, accountKey string) (bool, error) {
 		return false, err
 	}
 	if sameOpenClawConfig(data, updated) {
-		return false, nil
+		return tokenChanged, nil
 	}
 	if err := os.WriteFile(cfgPath, updated, 0o600); err != nil {
 		return false, err
@@ -882,10 +932,6 @@ func applyLiveAccountStatuses(accounts []model.Account, statuses map[string]chan
 		}
 	}
 	return changed
-}
-
-func accountsForLiveStatusSync(accounts []model.Account) []model.Account {
-	return append([]model.Account(nil), accounts...)
 }
 
 func resolveWhatsAppLoginModule() (string, error) {
@@ -1195,17 +1241,12 @@ func handleListAccounts(st *store.Store) gin.HandlerFunc {
 			accounts = []model.Account{}
 		}
 		if isOpenClawAvailable() {
-			// Sync live status in background — shelling out to openclaw is slow.
-			tenantID := session.ActiveTenantID
-			accountsForSync := accountsForLiveStatusSync(accounts)
-			go func(accounts []model.Account) {
-				statuses := readAllWhatsAppChannelStatuses()
-				for _, account := range applyLiveAccountStatuses(accounts, statuses) {
-					if _, err := st.UpdateAccount(tenantID, account.ID, "", account.Status, nil, nil, nil); err != nil {
-						slog.Default().Warn("persist live account status", "tenant_id", tenantID, "account_id", account.ID, "error", err)
-					}
+			statuses := readAllWhatsAppChannelStatuses()
+			for _, account := range applyLiveAccountStatuses(accounts, statuses) {
+				if _, err := st.UpdateAccount(session.ActiveTenantID, account.ID, "", account.Status, nil, nil, nil); err != nil {
+					slog.Default().Warn("persist live account status", "tenant_id", session.ActiveTenantID, "account_id", account.ID, "error", err)
 				}
-			}(accountsForSync)
+			}
 		}
 		c.JSON(http.StatusOK, model.AccountsResponse{Accounts: accounts})
 	}
