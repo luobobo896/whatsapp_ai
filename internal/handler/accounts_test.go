@@ -177,10 +177,67 @@ func TestEnsureOpenClawRAGConfigCreatesIsolatedMCPAndRoutePerAccount(t *testing.
 	}
 }
 
+func TestRemoveOpenClawRAGConfigOnlyRemovesRequestedAccount(t *testing.T) {
+	cfg := map[string]any{}
+	options := openClawRAGOptions{APIURL: "http://localhost", APIToken: "token", MCPPath: "/mcp/index.mjs", Workspace: "/workspaces"}
+	if err := ensureOpenClawRAGConfig(cfg, "account-sales", "wa_sales", options); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureOpenClawRAGConfig(cfg, "account-support", "wa_support", options); err != nil {
+		t.Fatal(err)
+	}
+	channels := map[string]any{
+		"whatsapp": map[string]any{
+			"accounts": map[string]any{
+				"wa_sales":   map[string]any{"enabled": true},
+				"wa_support": map[string]any{"enabled": true},
+			},
+		},
+	}
+	cfg["channels"] = channels
+
+	if !removeOpenClawRAGConfig(cfg, "wa_sales") {
+		t.Fatal("expected account removal")
+	}
+	servers := cfg["mcp"].(map[string]any)["servers"].(map[string]any)
+	if _, exists := servers[openClawRAGMCPName("wa_sales")]; exists {
+		t.Fatal("sales MCP remains")
+	}
+	if _, exists := servers[openClawRAGMCPName("wa_support")]; !exists {
+		t.Fatal("support MCP was removed")
+	}
+	if channels["whatsapp"].(map[string]any)["accounts"].(map[string]any)["wa_sales"].(map[string]any)["enabled"] != false {
+		t.Fatal("sales channel remains enabled")
+	}
+}
+
 func TestSameOpenClawConfigIgnoresTrailingNewline(t *testing.T) {
 	config := []byte("{\n  \"mcp\": {}\n}")
 	if !sameOpenClawConfig(append(config, '\n'), config) {
 		t.Fatal("trailing newline must not trigger an OpenClaw gateway restart")
+	}
+}
+
+func TestWriteOpenClawRAGWorkspaceAddsPolicyToExistingWorkspace(t *testing.T) {
+	workspace := t.TempDir()
+	agentDir := filepath.Join(workspace, openClawRAGAgentID("wa_support"))
+	if err := os.MkdirAll(agentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	policyPath := filepath.Join(agentDir, "AGENTS.md")
+	if err := os.WriteFile(policyPath, []byte("# Existing instructions\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeOpenClawRAGWorkspace(workspace, "wa_support"); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(policyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(content), "# Existing instructions") || !strings.Contains(string(content), openClawRAGPolicyStart) || !strings.Contains(string(content), "call search_knowledge") {
+		t.Fatalf("workspace policy = %q", content)
 	}
 }
 

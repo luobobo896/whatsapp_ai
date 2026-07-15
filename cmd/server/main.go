@@ -49,11 +49,9 @@ func run() error {
 	if err := seedPlatformAdmin(st); err != nil {
 		return fmt.Errorf("seed admin: %w", err)
 	}
-	go func() {
-		if err := handler.SyncOpenClawRAGAccounts(st); err != nil {
-			slog.Default().Warn("sync OpenClaw RAG accounts", "error", err)
-		}
-	}()
+	if err := handler.SyncOpenClawRAGAccounts(st); err != nil {
+		return fmt.Errorf("sync OpenClaw RAG accounts: %w", err)
+	}
 
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()

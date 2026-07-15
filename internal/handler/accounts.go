@@ -257,8 +257,12 @@ func ensureOpenClawAccountConfig(cfg map[string]any, accountKey string) bool {
 		wa["accounts"] = accounts
 		changed = true
 	}
-	if _, exists := accounts[accountKey]; !exists {
+	account, exists := accounts[accountKey].(map[string]any)
+	if !exists || account == nil {
 		accounts[accountKey] = map[string]any{"enabled": true}
+		changed = true
+	} else if account["enabled"] != true {
+		account["enabled"] = true
 		changed = true
 	}
 	return changed
@@ -372,6 +376,57 @@ func ensureOpenClawRAGConfig(cfg map[string]any, accountID, accountKey string, o
 	return nil
 }
 
+func removeOpenClawRAGConfig(cfg map[string]any, accountKey string) bool {
+	changed := false
+	mcpName := openClawRAGMCPName(accountKey)
+	if mcp, ok := cfg["mcp"].(map[string]any); ok {
+		if servers, ok := mcp["servers"].(map[string]any); ok {
+			if _, exists := servers[mcpName]; exists {
+				delete(servers, mcpName)
+				changed = true
+			}
+		}
+	}
+	agentID := openClawRAGAgentID(accountKey)
+	if agents, ok := cfg["agents"].(map[string]any); ok {
+		if list, ok := agents["list"].([]any); ok {
+			filtered := list[:0]
+			for _, raw := range list {
+				if agent, ok := raw.(map[string]any); ok && agent["id"] == agentID {
+					changed = true
+					continue
+				}
+				filtered = append(filtered, raw)
+			}
+			agents["list"] = filtered
+		}
+	}
+	if bindings, ok := cfg["bindings"].([]any); ok {
+		filtered := bindings[:0]
+		for _, raw := range bindings {
+			binding, ok := raw.(map[string]any)
+			match, _ := binding["match"].(map[string]any)
+			if ok && binding["agentId"] == agentID && match["channel"] == "whatsapp" && match["accountId"] == accountKey {
+				changed = true
+				continue
+			}
+			filtered = append(filtered, raw)
+		}
+		cfg["bindings"] = filtered
+	}
+	if channels, ok := cfg["channels"].(map[string]any); ok {
+		if whatsapp, ok := channels["whatsapp"].(map[string]any); ok {
+			if accounts, ok := whatsapp["accounts"].(map[string]any); ok {
+				if account, ok := accounts[accountKey].(map[string]any); ok && account["enabled"] != false {
+					account["enabled"] = false
+					changed = true
+				}
+			}
+		}
+	}
+	return changed
+}
+
 func openClawRAGSourceDir() (string, error) {
 	if configured := strings.TrimSpace(os.Getenv("WHATSAPP_AI_RAG_MCP_SOURCE_DIR")); configured != "" {
 		return configured, nil
@@ -481,6 +536,18 @@ func ensureOpenClawRAGAssets(cfgPath string) (string, error) {
 	return openClawRAGRuntimeDir(hostDir), nil
 }
 
+const (
+	openClawRAGPolicyStart = "<!-- whatsapp-ai-rag-policy:start -->"
+	openClawRAGPolicyEnd   = "<!-- whatsapp-ai-rag-policy:end -->"
+)
+
+func openClawRAGPolicy() string {
+	return openClawRAGPolicyStart + "\n" +
+		"# WhatsApp Knowledge-Base Reply Policy\n\n" +
+		"For every customer message, call search_knowledge before replying. Use only returned knowledge-base content and system instructions. Never answer from general knowledge. If the response begins [DIRECT_REPLY], send its supplied text verbatim. After sending, call save_reply with the exact content.\n" +
+		openClawRAGPolicyEnd + "\n"
+}
+
 func writeOpenClawRAGWorkspace(workspaceDir, accountKey string) error {
 	if err := os.MkdirAll(workspaceDir, 0o700); err != nil {
 		return err
@@ -496,14 +563,26 @@ func writeOpenClawRAGWorkspace(workspaceDir, accountKey string) error {
 		return err
 	}
 	policyPath := filepath.Join(agentDir, "AGENTS.md")
-	if _, err := os.Stat(policyPath); err == nil {
-		return nil
-	} else if !errors.Is(err, os.ErrNotExist) {
+	existing, err := os.ReadFile(policyPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	policy := "# WhatsApp Knowledge-Base Reply Policy\n\n" +
-		"For every customer message, call search_knowledge before replying. Use only returned knowledge-base content and system instructions. Never answer from general knowledge. If the response begins [DIRECT_REPLY], send its supplied text verbatim. After sending, call save_reply with the exact content.\n"
-	if err := os.WriteFile(policyPath, []byte(policy), 0o600); err != nil {
+	policy := openClawRAGPolicy()
+	updated := string(existing)
+	start := strings.Index(updated, openClawRAGPolicyStart)
+	end := strings.Index(updated, openClawRAGPolicyEnd)
+	if start >= 0 && end >= start {
+		updated = updated[:start] + policy + updated[end+len(openClawRAGPolicyEnd):]
+	} else if !strings.Contains(updated, openClawRAGPolicyStart) {
+		if updated != "" && !strings.HasSuffix(updated, "\n") {
+			updated += "\n"
+		}
+		updated += "\n" + policy
+	}
+	if string(existing) == updated {
+		return nil
+	}
+	if err := os.WriteFile(policyPath, []byte(updated), 0o600); err != nil {
 		return err
 	}
 	return ensureOpenClawDockerOwnership(policyPath)
@@ -561,6 +640,34 @@ func ensureOpenClawRAGAccount(accountID, accountKey string) (bool, error) {
 	}
 	if sameOpenClawConfig(data, updated) {
 		return false, nil
+	}
+	if err := os.WriteFile(cfgPath, updated, 0o600); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func disableOpenClawRAGAccount(accountKey string) (bool, error) {
+	cfgPath, err := openClawConfigPath()
+	if err != nil {
+		return false, err
+	}
+	openClawConfigMu.Lock()
+	defer openClawConfigMu.Unlock()
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return false, err
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return false, err
+	}
+	if !removeOpenClawRAGConfig(cfg, accountKey) {
+		return false, nil
+	}
+	updated, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return false, err
 	}
 	if err := os.WriteFile(cfgPath, updated, 0o600); err != nil {
 		return false, err
@@ -1194,6 +1301,19 @@ func handleUpdateAccount(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to update account."}})
 			return
 		}
+		if account.Status == "disabled" {
+			changed, err := disableOpenClawRAGAccount(account.AccountKey)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "OPENCLAW_ERROR", Message: fmt.Sprintf("停用知识库客服失败: %v", err)}})
+				return
+			}
+			if changed {
+				if err := restartOpenClawGatewaySafely(); err != nil {
+					c.JSON(http.StatusBadGateway, gin.H{"error": model.ErrorDetail{Code: "OPENCLAW_ERROR", Message: err.Error()}})
+					return
+				}
+			}
+		}
 		c.JSON(http.StatusOK, account)
 	}
 }
@@ -1366,6 +1486,17 @@ func handleDisconnect(st *store.Store) gin.HandlerFunc {
 		if err := disconnectOpenClawAccount(acct.AccountKey); err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": model.ErrorDetail{Code: "OPENCLAW_ERROR", Message: err.Error()}})
 			return
+		}
+		changed, err := disableOpenClawRAGAccount(acct.AccountKey)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "OPENCLAW_ERROR", Message: fmt.Sprintf("停用知识库客服失败: %v", err)}})
+			return
+		}
+		if changed {
+			if err := restartOpenClawGatewaySafely(); err != nil {
+				c.JSON(http.StatusBadGateway, gin.H{"error": model.ErrorDetail{Code: "OPENCLAW_ERROR", Message: err.Error()}})
+				return
+			}
 		}
 
 		qrCacheMu.Lock()

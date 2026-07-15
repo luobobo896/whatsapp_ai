@@ -4,7 +4,6 @@ set -euo pipefail
 
 project_root="${0:A:h:h}"
 dbx_store="$HOME/Library/Application Support/com.dbx.app/dbx.db"
-openclaw_config="$HOME/.openclaw/openclaw.json"
 internal_token_file="$HOME/.openclaw/whatsapp-ai.internal-token"
 python_bin="/opt/homebrew/bin/python3"
 
@@ -23,6 +22,7 @@ if [[ -z "${INTERNAL_API_TOKEN:-}" ]]; then
     export INTERNAL_API_TOKEN="$(<"$internal_token_file")"
   else
     umask 077
+    mkdir -p "${internal_token_file:h}"
     export INTERNAL_API_TOKEN="$(/usr/bin/openssl rand -hex 32)"
     print -r -- "$INTERNAL_API_TOKEN" > "$internal_token_file"
   fi
