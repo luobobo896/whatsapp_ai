@@ -267,6 +267,14 @@ func TestOpenClawCommandSpecDefaultsToHostCLI(t *testing.T) {
 	}
 }
 
+func TestOpenClawGatewayRestartUsesDockerContainerRestart(t *testing.T) {
+	t.Setenv("OPENCLAW_DOCKER_CONTAINER", "openclaw")
+	command, args := openClawGatewayRestartCommandSpec()
+	if command != "docker" || !slices.Equal(args, []string{"restart", "openclaw"}) {
+		t.Fatalf("restart command = %q %#v", command, args)
+	}
+}
+
 func TestOpenClawBridgeCommandSpecUsesConfiguredDockerContainer(t *testing.T) {
 	t.Setenv("OPENCLAW_DOCKER_CONTAINER", "openclaw")
 	command, args := openClawBridgeCommandSpec("/home/node/login-qr-runtime.js", "wa_support")

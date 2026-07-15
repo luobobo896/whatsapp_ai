@@ -190,6 +190,13 @@ func openClawCommand(ctx context.Context, args ...string) *exec.Cmd {
 	return exec.CommandContext(ctx, command, commandArgs...)
 }
 
+func openClawGatewayRestartCommandSpec() (string, []string) {
+	if container := openClawDockerContainer(); container != "" {
+		return "docker", []string{"restart", container}
+	}
+	return "openclaw", []string{"gateway", "restart"}
+}
+
 func openClawConfigPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -807,7 +814,8 @@ func parseWhatsAppChannelStatus(data []byte, accountKey string) channelConnectio
 func restartOpenClawGateway() error {
 	ctx, cancel := context.WithTimeout(context.Background(), openClawRestartWait)
 	defer cancel()
-	output, err := openClawCommand(ctx, "gateway", "restart").CombinedOutput()
+	command, args := openClawGatewayRestartCommandSpec()
+	output, err := exec.CommandContext(ctx, command, args...).CombinedOutput()
 	if err != nil {
 		message := strings.TrimSpace(string(output))
 		if message == "" {
