@@ -308,6 +308,7 @@ func ensureOpenClawRAGConfig(cfg map[string]any, accountID, accountKey string, o
 		servers = map[string]any{}
 		mcp["servers"] = servers
 	}
+	delete(servers, "whatsapp-rag")
 	mcpName := openClawRAGMCPName(accountKey)
 	servers[mcpName] = map[string]any{
 		"command": "node",
@@ -729,7 +730,7 @@ func openClawOutput(timeout time.Duration, args ...string) ([]byte, error) {
 }
 
 func readWhatsAppChannelStatus(accountKey string) channelConnectionStatus {
-	out, err := openClawOutput(openClawCommandTimeout, "channels", "status", "--channel", "whatsapp", "--account", accountKey, "--json")
+	out, err := openClawOutput(openClawCommandTimeout, "channels", "status", "--channel", "whatsapp", "--json")
 	if err != nil {
 		return channelConnectionStatus{}
 	}

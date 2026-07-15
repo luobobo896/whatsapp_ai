@@ -7,6 +7,8 @@ dbx_store="$HOME/Library/Application Support/com.dbx.app/dbx.db"
 internal_token_file="$HOME/.openclaw/whatsapp-ai.internal-token"
 python_bin="/opt/homebrew/bin/python3"
 
+export PATH="$HOME/.local/share/fnm/aliases/default/bin:$PATH"
+
 db_password="$(/usr/bin/sqlite3 "$dbx_store" "SELECT secret FROM connection_secrets WHERE connection_id = 'bf776d63-aeae-4503-b909-694e85028a68' AND key = 'password';")"
 if [[ -z "$db_password" ]]; then
   print -u2 'PostgreSQL password is not available from the local DBX connection.'
@@ -30,5 +32,6 @@ fi
 export HTTP_HOST="127.0.0.1"
 export PORT="8790"
 export COOKIE_SECURE="false"
+export WHATSAPP_AI_RAG_MCP_SOURCE_DIR="$project_root/cmd/rag-mcp-server"
 
 exec "$project_root/server"

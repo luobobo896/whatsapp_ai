@@ -839,7 +839,7 @@ func (s *Store) searchKnowledge(tenantID string, baseIDs []string, query string,
 		likeParts[i] = fmt.Sprintf("(a.title ILIKE '%%%%' || %s || '%%%%' OR a.content ILIKE '%%%%' || %s || '%%%%' OR a.category ILIKE '%%%%' || %s || '%%%%' OR a.attributes ILIKE '%%%%' || %s || '%%%%')", p, p, p, p)
 		args = append(args, w)
 	}
-	sql := fmt.Sprintf("SELECT a.id, a.title, a.content, a.category, a.attributes, k.name AS kb_name, (%s) AS score FROM knowledge_articles a JOIN knowledge_bases k ON a.knowledge_base_id = k.id WHERE k.tenant_id=$1 AND a.status='active' AND k.status='active'%s AND (%s) ORDER BY score DESC LIMIT $2", strings.Join(scoreParts, " + "), baseFilter, strings.Join(likeParts, " AND "))
+	sql := fmt.Sprintf("SELECT a.id, a.title, a.content, a.category, a.attributes, k.name AS kb_name, (%s) AS score FROM knowledge_articles a JOIN knowledge_bases k ON a.knowledge_base_id = k.id WHERE k.tenant_id=$1 AND a.status='active' AND k.status='active'%s AND (%s) ORDER BY score DESC LIMIT $2", strings.Join(scoreParts, " + "), baseFilter, strings.Join(likeParts, " OR "))
 	rows, err := s.pool.Query(context.Background(), sql, args...)
 	if err != nil {
 		return nil, err
@@ -952,7 +952,7 @@ func splitQuery(q string) []string {
 			result = append(result, p)
 			seen[p] = true
 		}
-		// For Chinese text (>2 chars), add bigrams and unigrams for fuzzy matching
+		// For Chinese text (>2 chars), add bigrams for fuzzy matching.
 		runes := []rune(p)
 		if len(runes) > 2 {
 			for i := 0; i < len(runes)-1; i++ {
@@ -960,13 +960,6 @@ func splitQuery(q string) []string {
 				if !seen[bigram] {
 					result = append(result, bigram)
 					seen[bigram] = true
-				}
-			}
-			for _, r := range runes {
-				ch := string(r)
-				if !seen[ch] {
-					result = append(result, ch)
-					seen[ch] = true
 				}
 			}
 		}

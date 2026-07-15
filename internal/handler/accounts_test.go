@@ -120,7 +120,13 @@ func TestEnsureOpenClawAccountConfigCreatesMissingChannels(t *testing.T) {
 }
 
 func TestEnsureOpenClawRAGConfigCreatesIsolatedMCPAndRoutePerAccount(t *testing.T) {
-	cfg := map[string]any{}
+	cfg := map[string]any{
+		"mcp": map[string]any{
+			"servers": map[string]any{
+				"whatsapp-rag": map[string]any{"command": "node"},
+			},
+		},
+	}
 	options := openClawRAGOptions{
 		APIURL:    "https://whatsapp.example.com",
 		APIToken:  "test-token",
@@ -139,6 +145,9 @@ func TestEnsureOpenClawRAGConfigCreatesIsolatedMCPAndRoutePerAccount(t *testing.
 	}
 
 	servers := cfg["mcp"].(map[string]any)["servers"].(map[string]any)
+	if _, exists := servers["whatsapp-rag"]; exists {
+		t.Fatal("legacy global RAG MCP remains configured")
+	}
 	sales := servers[openClawRAGMCPName("wa_sales")].(map[string]any)
 	support := servers[openClawRAGMCPName("wa_support")].(map[string]any)
 	if sales["env"].(map[string]any)["WHATSAPP_AI_ACCOUNT_ID"] != "account-sales" {
