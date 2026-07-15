@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.whatsapp-ai.server</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>/Users/hanson/work/个人文档/whatsapp_ai/tools/launch-server.sh</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/hanson/Library/Logs/whatsapp-ai-server.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/hanson/Library/Logs/whatsapp-ai-server-error.log</string>
+</dict>
+</plist>

@@ -14,6 +14,14 @@ const kbMap = computed(() => {
   return map;
 });
 
+function knowledgePreview(ids) {
+  return (ids || []).slice(0, 2).map((id) => kbMap.value[id] || id.slice(0, 8));
+}
+
+function remainingKnowledgeCount(ids) {
+  return Math.max((ids || []).length - 2, 0);
+}
+
 function onAccountChanged() {
   qrAccount.value = null;
   emit("changed");
@@ -21,12 +29,12 @@ function onAccountChanged() {
 </script>
 
 <template>
-  <el-card shadow="never">
+  <el-card shadow="never" class="accounts-panel">
     <template #header>
-      <div style="display:flex;align-items:center;justify-content:space-between">
+      <div class="panel-header">
         <div>
-          <span style="font-weight:600">客服账号</span>
-          <div style="font-size:11px;color:#6b736d;margin-top:2px">当前租户的 WhatsApp 服务账号</div>
+          <span class="panel-title">客服账号</span>
+          <div class="panel-subtitle">管理 WhatsApp 连接、回复容量与知识库范围</div>
         </div>
         <el-button v-if="canManage" type="primary" :icon="Plus" @click="emit('create')">新建账号</el-button>
       </div>
@@ -34,9 +42,16 @@ function onAccountChanged() {
     <el-empty v-if="!accounts.length" description="暂无客服账号">
       <el-button v-if="canManage" type="primary" :icon="Plus" @click="emit('create')">新建账号</el-button>
     </el-empty>
-    <el-table v-else :data="accounts" stripe>
-      <el-table-column prop="name" label="账号名称" />
-      <el-table-column prop="accountKey" label="系统标识" />
+    <div v-else class="accounts-table-wrap">
+    <el-table :data="accounts" class="accounts-table">
+      <el-table-column prop="name" label="账号名称" min-width="144">
+        <template #default="{ row }">
+          <div class="account-name-cell">
+            <strong>{{ row.name }}</strong>
+            <code>{{ row.accountKey }}</code>
+          </div>
+        </template>
+      </el-table-column>
       <el-table-column prop="status" label="连接状态">
         <template #default="{ row }">
           <el-tag :type="row.status === 'connected' ? 'success' : row.status === 'disabled' ? 'warning' : 'info'" size="small">
@@ -44,20 +59,25 @@ function onAccountChanged() {
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="绑定知识库">
+      <el-table-column label="知识库范围" min-width="230">
         <template #default="{ row }">
-          <template v-if="row.kbId && row.kbId.length">
-            <el-tag v-for="id in row.kbId" :key="id" size="small" type="success" style="margin-right:4px;margin-bottom:2px">
-              {{ kbMap[id] || id.slice(0, 8) }}
-            </el-tag>
-          </template>
-          <span v-else style="color:#c0c4cc">未绑定</span>
+          <div v-if="row.kbId && row.kbId.length" class="knowledge-summary-cell">
+            <strong>{{ row.kbId.length }} 个知识库</strong>
+            <span>{{ knowledgePreview(row.kbId).join("、") }}</span>
+            <span v-if="remainingKnowledgeCount(row.kbId)" class="knowledge-summary-more">另 {{ remainingKnowledgeCount(row.kbId) }} 个</span>
+          </div>
+          <span v-else class="empty-value">未绑定</span>
         </template>
       </el-table-column>
-      <el-table-column label="今日回复">
-        <template #default="{ row }">{{ row.dailyReplies || 0 }} / {{ row.dailyLimit || "不限" }}</template>
+      <el-table-column label="今日回复" width="126">
+        <template #default="{ row }">
+          <div class="reply-capacity">
+            <strong>{{ row.dailyReplies || 0 }}</strong>
+            <span>/ {{ row.dailyLimit || "不限" }}</span>
+          </div>
+        </template>
       </el-table-column>
-      <el-table-column label="创建时间">
+      <el-table-column label="创建时间" width="162">
         <template #default="{ row }">{{ formatDate(row.createdAt) }}</template>
       </el-table-column>
       <el-table-column label="操作" width="260">
@@ -99,6 +119,7 @@ function onAccountChanged() {
         </template>
       </el-table-column>
     </el-table>
+    </div>
   </el-card>
 
   <!-- QR Login Dialog -->

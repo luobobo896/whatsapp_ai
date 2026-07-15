@@ -311,6 +311,7 @@ function navigate(v) {
           v-if="!loading && view === 'chat' && chatAccount"
           :key="`${chatAccount.id}:${chatConversationId}`"
           :account="chatAccount"
+          :knowledge-bases="knowledgeBases"
           :csrf-token="session?.csrfToken"
           :initial-conversation-id="chatConversationId"
           @back="closeChat"

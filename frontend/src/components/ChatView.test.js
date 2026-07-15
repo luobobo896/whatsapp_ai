@@ -27,7 +27,7 @@ function mountChat(initialConversationId = "") {
         ElTag: { template: "<span><slot /></span>" },
         ElInput: {
           props: ["modelValue"],
-          template: "<textarea :value='modelValue' @input='$emit(\"update:modelValue\", $event.target.value)' />",
+          template: "<textarea v-bind='$attrs' :value='modelValue' @input='$emit(\"update:modelValue\", $event.target.value)' />",
         },
         ElIcon: { template: "<span />" },
       },
@@ -90,7 +90,7 @@ describe("ChatView", () => {
 
     const wrapper = mountChat("+8613800000000");
     await flushPromises();
-    await wrapper.find("textarea").setValue("您好，我来协助您");
+    await wrapper.find(".chat-composer-input").setValue("您好，我来协助您");
     await wrapper.findAll("button").find((button) => button.text() === "发送").trigger("click");
     await flushPromises();
 
