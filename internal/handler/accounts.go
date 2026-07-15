@@ -482,6 +482,12 @@ func ensureOpenClawRAGAssets(cfgPath string) (string, error) {
 }
 
 func writeOpenClawRAGWorkspace(workspaceDir, accountKey string) error {
+	if err := os.MkdirAll(workspaceDir, 0o700); err != nil {
+		return err
+	}
+	if err := ensureOpenClawDockerOwnership(workspaceDir); err != nil {
+		return err
+	}
 	agentDir := filepath.Join(workspaceDir, openClawRAGAgentID(accountKey))
 	if err := os.MkdirAll(agentDir, 0o700); err != nil {
 		return err
