@@ -54,6 +54,19 @@ describe("QrLoginCard", () => {
     wrapper.unmount();
   });
 
+  it("reuses an already connected OpenClaw account without polling for a QR code", async () => {
+    post.mockResolvedValue({ status: "connected", accountId: "account-1" });
+    const wrapper = mountCard();
+
+    await wrapper.find("button").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("WhatsApp 已连接");
+    expect(wrapper.emitted("connected")?.length).toBeGreaterThan(0);
+    expect(get).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
   it("stops the QR countdown after scanning and keeps polling until connected", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-14T12:00:00Z"));

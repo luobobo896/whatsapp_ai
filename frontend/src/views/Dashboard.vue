@@ -74,6 +74,8 @@ const editKnowledgeOpen = ref(false);
 const editingKnowledgeBase = ref(null);
 const knowledgeBaseId = ref(null);
 const chatAccount = ref(null);
+const chatConversationId = ref("");
+const chatReturnView = ref("accounts");
 
 const activeTenant = computed(() =>
   tenants.value.find((t) => t.id === session.value?.activeTenantId) || null,
@@ -97,6 +99,31 @@ function navigateToKnowledgeDetail(base) {
 function backFromKnowledgeDetail() {
   knowledgeBaseId.value = null;
   navigate("knowledge");
+}
+
+function openAccountChat(account) {
+  chatAccount.value = account;
+  chatConversationId.value = "";
+  chatReturnView.value = "accounts";
+  view.value = "chat";
+}
+
+function openConversationChat(conversation) {
+  const account = accounts.value.find((item) => item.id === conversation.accountId);
+  if (!account) {
+    showToast({ tone: "error", message: "未找到该会话所属的客服账号" });
+    return;
+  }
+  chatAccount.value = account;
+  chatConversationId.value = conversation.conversationId;
+  chatReturnView.value = "conversations";
+  view.value = "chat";
+}
+
+function closeChat() {
+  chatAccount.value = null;
+  chatConversationId.value = "";
+  view.value = chatReturnView.value;
 }
 
 onMounted(() => {
@@ -257,7 +284,7 @@ function navigate(v) {
           :knowledge-bases="knowledgeBases"
           @create="createAccountOpen = true"
           @edit="(acct) => { editingAccount = acct; editAccountOpen = true }"
-          @chat="(acct) => { chatAccount = acct; view = 'chat' }"
+          @chat="openAccountChat"
           @changed="loadData()"
         />
         <KnowledgeView
@@ -279,12 +306,14 @@ function navigate(v) {
           @base-updated="() => { editingKnowledgeBase = selectedKnowledgeBase; editKnowledgeOpen = true; }"
           @articles-changed="loadData()"
         />
-        <ConversationsView v-if="!loading && view === 'conversations'" :conversations="conversations" :accounts="accounts" :can-manage="canManageAccounts" :csrf-token="session?.csrfToken" @chat="(acct) => { chatAccount = acct; view = 'chat' }" @changed="loadData()" />
+        <ConversationsView v-if="!loading && view === 'conversations'" :conversations="conversations" :accounts="accounts" :can-manage="canManageAccounts" :csrf-token="session?.csrfToken" @chat="openConversationChat" @changed="loadData()" />
         <ChatView
           v-if="!loading && view === 'chat' && chatAccount"
+          :key="`${chatAccount.id}:${chatConversationId}`"
           :account="chatAccount"
           :csrf-token="session?.csrfToken"
-          @back="view = 'accounts'"
+          :initial-conversation-id="chatConversationId"
+          @back="closeChat"
         />
         <TenantsView
           v-if="!loading && view === 'tenants'" :tenants="tenants" :platform-role="platformRole"

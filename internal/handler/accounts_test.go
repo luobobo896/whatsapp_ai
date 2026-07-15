@@ -157,6 +157,25 @@ func TestEnsureOpenClawAccountAtPathPreservesConcurrentRegistrations(t *testing.
 	}
 }
 
+func TestEnsureOpenClawAccountAtPathCreatesMissingConfig(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "nested", "openclaw.json")
+	if err := ensureOpenClawAccountAtPath(configPath, "wa_support"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	accounts := cfg["channels"].(map[string]any)["whatsapp"].(map[string]any)["accounts"].(map[string]any)
+	if _, ok := accounts["wa_support"]; !ok {
+		t.Fatalf("missing account in %#v", accounts)
+	}
+}
+
 func TestRestartAndWaitForOpenClawAccountRequiresRunningConnection(t *testing.T) {
 	restartCalls := 0
 	statusCalls := 0
@@ -270,6 +289,7 @@ func TestWhatsAppQrBridgeStreamsNativePngAndConnection(t *testing.T) {
 export async function startWebLoginWithQr() {
   return { qrDataUrl: "data:image/png;base64,ZmFrZQ==", message: "ready" };
 }
+
 export async function waitForWebLogin(options) {
   if (options.timeoutMs !== 90000) {
     throw new Error("expected a 90-second bridge window");
@@ -309,5 +329,27 @@ export async function waitForWebLogin(options) {
 	}
 	if statusEvent.Type != "status" || !statusEvent.Connected {
 		t.Fatalf("status event = %#v, want connected", statusEvent)
+	}
+}
+
+func TestNormalizeWhatsAppTarget(t *testing.T) {
+	for _, tt := range []struct {
+		input string
+		want  string
+		valid bool
+	}{
+		{input: "+8613800000000", want: "+8613800000000", valid: true},
+		{input: "8613800000000@s.whatsapp.net", want: "+8613800000000", valid: true},
+		{input: "8613800000000@c.us", want: "+8613800000000", valid: true},
+		{input: "unknown", valid: false},
+		{input: "1", valid: false},
+	} {
+		got, err := normalizeWhatsAppTarget(tt.input)
+		if tt.valid && (err != nil || got != tt.want) {
+			t.Fatalf("normalizeWhatsAppTarget(%q) = %q, %v; want %q, nil", tt.input, got, err, tt.want)
+		}
+		if !tt.valid && err == nil {
+			t.Fatalf("normalizeWhatsAppTarget(%q) succeeded", tt.input)
+		}
 	}
 }

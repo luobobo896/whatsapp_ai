@@ -62,6 +62,7 @@ type QrLoginResponse struct {
 	QrData    string `json:"qrData"`
 	ExpiresAt string `json:"expiresAt"`
 	AccountID string `json:"accountId"`
+	Status    string `json:"status,omitempty"`
 }
 
 type AccountStatusResponse struct {
@@ -157,15 +158,15 @@ type InviteResponse struct {
 // -- account --
 
 type Account struct {
-	ID         string   `json:"id"`
-	Name       string   `json:"name"`
-	AccountKey string   `json:"accountKey"`
-	Status     string   `json:"status"`
-	DailyLimit int      `json:"dailyLimit"`
-	DailyReplies int    `json:"dailyReplies"`
-	KbID       []string `json:"kbId"`
-	ReplyLimit int      `json:"replyLimit"`
-	CreatedAt  string   `json:"createdAt"`
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	AccountKey   string   `json:"accountKey"`
+	Status       string   `json:"status"`
+	DailyLimit   int      `json:"dailyLimit"`
+	DailyReplies int      `json:"dailyReplies"`
+	KbID         []string `json:"kbId"`
+	ReplyLimit   int      `json:"replyLimit"`
+	CreatedAt    string   `json:"createdAt"`
 }
 
 type AccountsResponse struct {
@@ -208,6 +209,10 @@ type KnowledgeArticle struct {
 
 type KnowledgeArticlesResponse struct {
 	Articles []KnowledgeArticle `json:"articles"`
+}
+
+type KnowledgeImportResponse struct {
+	Created int `json:"created"`
 }
 
 type CreateArticleRequest struct {
@@ -283,24 +288,32 @@ type SaveReplyRequest struct {
 	KnowledgeIDs   string `json:"knowledgeIds"`
 }
 
+// SendConversationReplyRequest is the operator's reply to a single customer
+// conversation. The account is scoped explicitly to prevent cross-account sends.
+type SendConversationReplyRequest struct {
+	AccountID    string `json:"accountId"`
+	CustomerName string `json:"customerName"`
+	Content      string `json:"content"`
+}
+
 // -- RAG query --
 
 type ConversationQueryRequest struct {
-	ConversationID string           `json:"conversationId"`
-	CustomerName   string           `json:"customerName"`
-	Message        string           `json:"message"`
-	AccountID      string           `json:"accountId"`
-	MaxHistory     int              `json:"maxHistory"`
-	MaxKnowledge   int              `json:"maxKnowledge"`
+	ConversationID string `json:"conversationId"`
+	CustomerName   string `json:"customerName"`
+	Message        string `json:"message"`
+	AccountID      string `json:"accountId"`
+	MaxHistory     int    `json:"maxHistory"`
+	MaxKnowledge   int    `json:"maxKnowledge"`
 	// History provided by OpenClaw (its own stored messages, chronological order).
 	// When present, used directly as context and persisted locally for traceability.
 	// When absent, history is loaded from the local database.
-	History        []OpenClawMessage `json:"history,omitempty"`
+	History []OpenClawMessage `json:"history,omitempty"`
 }
 
 // OpenClawMessage is a single message entry sent by OpenClaw in the history field.
 type OpenClawMessage struct {
-	Role      string `json:"role"`    // "user" or "assistant"
+	Role      string `json:"role"` // "user" or "assistant"
 	Content   string `json:"content"`
 	Timestamp string `json:"timestamp,omitempty"` // ISO-8601, optional
 }

@@ -4,7 +4,11 @@ import { ArrowLeft, SendHorizontal } from "lucide-vue-next";
 import { get, post, messageForError } from "../api";
 import { formatDate } from "../utils";
 
-const props = defineProps({ account: Object, csrfToken: String });
+const props = defineProps({
+  account: { type: Object, required: true },
+  csrfToken: { type: String, default: "" },
+  initialConversationId: { type: String, default: "" },
+});
 const emit = defineEmits(["back"]);
 const showToast = inject("showToast");
 
@@ -17,6 +21,8 @@ const replyText = ref("");
 const sending = ref(false);
 const chatBody = ref(null);
 let pollTimer = null;
+let messageRequestVersion = 0;
+let polling = false;
 
 onUnmounted(() => clearInterval(pollTimer));
 
@@ -25,6 +31,8 @@ async function loadConversations() {
   try {
     const resp = await get(`/api/conversations?accountId=${props.account.id}`);
     conversations.value = resp.conversations || [];
+    const initialConversation = conversations.value.find((conv) => conv.conversationId === props.initialConversationId);
+    if (initialConversation) await loadMessages(initialConversation);
   } catch (error) {
     showToast({ tone: "error", message: messageForError(error) });
   } finally {
@@ -33,18 +41,24 @@ async function loadConversations() {
 }
 
 async function loadMessages(conv) {
+  const requestVersion = ++messageRequestVersion;
   selectedConv.value = conv;
   loadingMsgs.value = true;
   try {
     const limit = props.account.replyLimit || 30;
     const resp = await get(`/api/conversations/${conv.conversationId}/messages?accountId=${encodeURIComponent(props.account.id)}&limit=${limit}`);
+    if (requestVersion !== messageRequestVersion) return;
     messages.value = (resp.messages || []).reverse();
-  } catch {
+  } catch (error) {
+    if (requestVersion !== messageRequestVersion) return;
     messages.value = [];
+    showToast({ tone: "error", message: messageForError(error) });
   } finally {
-    loadingMsgs.value = false;
-    await nextTick();
-    scrollToBottom();
+    if (requestVersion === messageRequestVersion) {
+      loadingMsgs.value = false;
+      await nextTick();
+      scrollToBottom();
+    }
   }
 }
 
@@ -60,14 +74,11 @@ async function sendReply() {
   sending.value = true;
   try {
     await post(
-      "/api/conversations/messages",
+      `/api/conversations/${encodeURIComponent(selectedConv.value.conversationId)}/send`,
       {
-        conversationId: selectedConv.value.conversationId,
         accountId: props.account.id,
         customerName: selectedConv.value.customerName,
-        role: "assistant",
         content: text,
-        knowledgeIds: "[]",
       },
       props.csrfToken,
     );
@@ -92,16 +103,19 @@ function handleKeydown(e) {
 function startPolling(conv) {
   clearInterval(pollTimer);
   pollTimer = setInterval(async () => {
+    if (polling || selectedConv.value?.conversationId !== conv.conversationId) return;
+    polling = true;
     try {
       const limit = props.account.replyLimit || 30;
       const resp = await get(`/api/conversations/${conv.conversationId}/messages?accountId=${encodeURIComponent(props.account.id)}&limit=${limit}`);
       const latest = (resp.messages || []).reverse();
-      if (latest.length !== messages.value.length) {
+      if (latest.length !== messages.value.length || latest.at(-1)?.id !== messages.value.at(-1)?.id) {
         messages.value = latest;
         await nextTick();
         scrollToBottom();
       }
-    } catch { /* ignore */ }
+    } catch { /* polling failures should not interrupt manual replies */ }
+    finally { polling = false; }
   }, 5000);
 }
 
@@ -153,6 +167,13 @@ loadConversations();
 
     <!-- Chat area -->
     <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+      <div v-if="selectedConv" style="padding:12px 16px;border-bottom:1px solid #e2e6e3;background:#fff;display:flex;align-items:center;justify-content:space-between">
+        <div>
+          <div style="font-size:14px;font-weight:700;color:#202c33">{{ selectedConv.customerName || "未命名客户" }}</div>
+          <div style="font-size:11px;color:#6b736d;margin-top:2px">{{ selectedConv.messageCount }} 条消息</div>
+        </div>
+        <el-tag size="small" type="success">当前会话</el-tag>
+      </div>
       <!-- Chat body -->
       <div ref="chatBody" style="flex:1;overflow-y:auto;padding:16px;background:#efeae2">
         <div v-if="!selectedConv" style="display:flex;align-items:center;justify-content:center;height:100%;color:#6b736d;font-size:14px">

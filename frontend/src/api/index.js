@@ -29,7 +29,7 @@ async function request(path, options = {}) {
     credentials: "same-origin",
     ...options,
     headers: {
-      ...(options.body ? { "Content-Type": "application/json" } : {}),
+      ...(options.body && !(options.body instanceof FormData) ? { "Content-Type": "application/json" } : {}),
       ...options.headers,
     },
   });
@@ -64,6 +64,14 @@ export function post(path, body, csrfToken) {
     headers: csrfToken
       ? { "X-CSRF-Token": csrfToken }
       : undefined,
+  });
+}
+
+export function postForm(path, body, csrfToken) {
+  return request(path, {
+    method: "POST",
+    body,
+    headers: csrfToken ? { "X-CSRF-Token": csrfToken } : undefined,
   });
 }
 

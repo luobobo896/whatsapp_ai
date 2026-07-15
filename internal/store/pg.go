@@ -32,6 +32,28 @@ func dailyReplyLimitReached(limit, count int) bool {
 	return limit > 0 && count >= limit
 }
 
+// CheckAssistantReplyCapacity rejects a send before it reaches the external
+// WhatsApp gateway when the account has exhausted its daily reply allowance.
+func (s *Store) CheckAssistantReplyCapacity(tenantID, accountID string) error {
+	var dailyLimit, repliesToday int
+	if err := s.pool.QueryRow(context.Background(),
+		`SELECT a.daily_limit, COUNT(m.id)
+		 FROM accounts a
+		 LEFT JOIN conversation_messages m ON m.tenant_id=a.tenant_id
+		  AND m.account_id=a.id AND m.role='assistant'
+		  AND m.created_at >= date_trunc('day', CURRENT_TIMESTAMP)
+		 WHERE a.id=$1 AND a.tenant_id=$2
+		 GROUP BY a.daily_limit`,
+		accountID, tenantID,
+	).Scan(&dailyLimit, &repliesToday); err != nil {
+		return err
+	}
+	if dailyReplyLimitReached(dailyLimit, repliesToday) {
+		return ErrDailyReplyLimitReached
+	}
+	return nil
+}
+
 func Open(ctx context.Context, dsn string) (*Store, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
@@ -56,7 +78,7 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 
 func (s *Store) Close() { s.pool.Close() }
 
-func genID() string  { b := make([]byte, 12); rand.Read(b); return hex.EncodeToString(b) }
+func genID() string    { b := make([]byte, 12); rand.Read(b); return hex.EncodeToString(b) }
 func genToken() string { b := make([]byte, 32); rand.Read(b); return hex.EncodeToString(b) }
 
 // ---- migrations ----
@@ -172,7 +194,7 @@ func (s *Store) migrate(ctx context.Context) error {
 
 // ---- users ----
 
-func (s *Store) CreateUser( email, displayName, passwordHash, platformRole string) (*model.UserRow, error) {
+func (s *Store) CreateUser(email, displayName, passwordHash, platformRole string) (*model.UserRow, error) {
 	u := &model.UserRow{
 		ID: genID(), Email: email, DisplayName: displayName,
 		PasswordHash: passwordHash, PlatformRole: platformRole,
@@ -188,7 +210,7 @@ func (s *Store) CreateUser( email, displayName, passwordHash, platformRole strin
 	return u, nil
 }
 
-func (s *Store) UserByEmail( email string) (*model.UserRow, error) {
+func (s *Store) UserByEmail(email string) (*model.UserRow, error) {
 	u := &model.UserRow{}
 	err := s.pool.QueryRow(context.Background(),
 		`SELECT id,email,display_name,password_hash,platform_role,
@@ -201,7 +223,7 @@ func (s *Store) UserByEmail( email string) (*model.UserRow, error) {
 	return u, nil
 }
 
-func (s *Store) UserByID( id string) (*model.UserRow, error) {
+func (s *Store) UserByID(id string) (*model.UserRow, error) {
 	u := &model.UserRow{}
 	err := s.pool.QueryRow(context.Background(),
 		`SELECT id,email,display_name,password_hash,platform_role,
@@ -216,7 +238,7 @@ func (s *Store) UserByID( id string) (*model.UserRow, error) {
 
 // ---- sessions ----
 
-func (s *Store) CreateSession( userID string) (*model.SessionRow, error) {
+func (s *Store) CreateSession(userID string) (*model.SessionRow, error) {
 	sess := &model.SessionRow{
 		ID: genToken(), UserID: userID, CSRFToken: genToken(),
 		ExpiresAt: time.Now().Add(24 * time.Hour).Format("2006-01-02 15:04:05"),
@@ -232,7 +254,7 @@ func (s *Store) CreateSession( userID string) (*model.SessionRow, error) {
 	return sess, nil
 }
 
-func (s *Store) SessionByID( id string) (*model.SessionRow, error) {
+func (s *Store) SessionByID(id string) (*model.SessionRow, error) {
 	sess := &model.SessionRow{}
 	var activeTenant *string
 	err := s.pool.QueryRow(context.Background(),
@@ -253,19 +275,19 @@ func (s *Store) SessionByID( id string) (*model.SessionRow, error) {
 	return sess, nil
 }
 
-func (s *Store) UpdateSessionTenant( sessionID, tenantID string) error {
+func (s *Store) UpdateSessionTenant(sessionID, tenantID string) error {
 	_, err := s.pool.Exec(context.Background(), `UPDATE sessions SET active_tenant_id=$1 WHERE id=$2`, tenantID, sessionID)
 	return err
 }
 
-func (s *Store) DeleteSession( id string) error {
+func (s *Store) DeleteSession(id string) error {
 	_, err := s.pool.Exec(context.Background(), `DELETE FROM sessions WHERE id=$1`, id)
 	return err
 }
 
 // ---- tenants ----
 
-func (s *Store) CreateTenant( name string) (*model.TenantRow, error) {
+func (s *Store) CreateTenant(name string) (*model.TenantRow, error) {
 	t := &model.TenantRow{ID: genID(), Name: name, Status: "active"}
 	err := s.pool.QueryRow(context.Background(),
 		`INSERT INTO tenants (id,name) VALUES ($1,$2) RETURNING to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')`,
@@ -325,7 +347,7 @@ func (s *Store) CreateTenantWithOwner(name, passwordHash, platformAdminID string
 	return tenant, owner, nil
 }
 
-func (s *Store) TenantByID( id string) (*model.TenantRow, error) {
+func (s *Store) TenantByID(id string) (*model.TenantRow, error) {
 	t := &model.TenantRow{}
 	err := s.pool.QueryRow(context.Background(),
 		`SELECT id,name,status,to_char(created_at, 'YYYY-MM-DD HH24:MI:SS') FROM tenants WHERE id=$1`, id,
@@ -336,12 +358,12 @@ func (s *Store) TenantByID( id string) (*model.TenantRow, error) {
 	return t, nil
 }
 
-func (s *Store) UpdateTenantStatus( id, status string) error {
+func (s *Store) UpdateTenantStatus(id, status string) error {
 	_, err := s.pool.Exec(context.Background(), `UPDATE tenants SET status=$1 WHERE id=$2`, status, id)
 	return err
 }
 
-func (s *Store) TenantsForUser( userID string) ([]model.TenantWithMembership, error) {
+func (s *Store) TenantsForUser(userID string) ([]model.TenantWithMembership, error) {
 	rows, err := s.pool.Query(context.Background(), `
 		SELECT t.id, t.name, t.status, tm.role, tm.status
 		FROM tenants t
@@ -383,7 +405,7 @@ func (s *Store) AllTenants() ([]model.TenantWithMembership, error) {
 
 // ---- tenant members ----
 
-func (s *Store) AddTenantMember( tenantID, userID, role string) error {
+func (s *Store) AddTenantMember(tenantID, userID, role string) error {
 	_, err := s.pool.Exec(context.Background(),
 		`INSERT INTO tenant_members (tenant_id,user_id,role,status) VALUES ($1,$2,$3,'active')
 		 ON CONFLICT (tenant_id, user_id) DO UPDATE SET role=$3, status='active'`,
@@ -392,7 +414,7 @@ func (s *Store) AddTenantMember( tenantID, userID, role string) error {
 	return err
 }
 
-func (s *Store) TenantMember( tenantID, userID string) (*model.TenantMemberRow, error) {
+func (s *Store) TenantMember(tenantID, userID string) (*model.TenantMemberRow, error) {
 	m := &model.TenantMemberRow{}
 	err := s.pool.QueryRow(context.Background(),
 		`SELECT tenant_id,user_id,role,status FROM tenant_members WHERE tenant_id=$1 AND user_id=$2`,
@@ -404,7 +426,7 @@ func (s *Store) TenantMember( tenantID, userID string) (*model.TenantMemberRow, 
 	return m, nil
 }
 
-func (s *Store) UpdateMember( tenantID, userID, role, status string) error {
+func (s *Store) UpdateMember(tenantID, userID, role, status string) error {
 	q := `UPDATE tenant_members SET `
 	args := []any{}
 	argIdx := 1
@@ -424,7 +446,7 @@ func (s *Store) UpdateMember( tenantID, userID, role, status string) error {
 	return err
 }
 
-func (s *Store) TenantMembers( tenantID string) ([]model.Member, error) {
+func (s *Store) TenantMembers(tenantID string) ([]model.Member, error) {
 	rows, err := s.pool.Query(context.Background(), `
 		SELECT u.id, u.email, u.display_name, tm.role, tm.status,
 		       to_char(u.created_at, 'YYYY-MM-DD HH24:MI:SS')
@@ -448,7 +470,7 @@ func (s *Store) TenantMembers( tenantID string) ([]model.Member, error) {
 
 // ---- invitations ----
 
-func (s *Store) CreateInvitation( tenantID, email, role string) (*model.InvitationRow, error) {
+func (s *Store) CreateInvitation(tenantID, email, role string) (*model.InvitationRow, error) {
 	inv := &model.InvitationRow{
 		ID: genID(), Token: genToken(), TenantID: tenantID,
 		Email: email, Role: role,
@@ -465,7 +487,7 @@ func (s *Store) CreateInvitation( tenantID, email, role string) (*model.Invitati
 	return inv, nil
 }
 
-func (s *Store) InvitationByToken( token string) (*model.InvitationRow, error) {
+func (s *Store) InvitationByToken(token string) (*model.InvitationRow, error) {
 	inv := &model.InvitationRow{}
 	err := s.pool.QueryRow(context.Background(),
 		`SELECT id,token,tenant_id,email,role,
@@ -483,7 +505,7 @@ func (s *Store) InvitationByToken( token string) (*model.InvitationRow, error) {
 	return inv, nil
 }
 
-func (s *Store) DeleteInvitation( id string) error {
+func (s *Store) DeleteInvitation(id string) error {
 	_, err := s.pool.Exec(context.Background(), `DELETE FROM invitations WHERE id=$1`, id)
 	return err
 }
@@ -493,7 +515,9 @@ func (s *Store) DeleteInvitation( id string) error {
 func (s *Store) AcceptInvitationForUser(invitationID, userID string) (*model.SessionRow, string, error) {
 	ctx := context.Background()
 	tx, err := s.pool.Begin(ctx)
-	if err != nil { return nil, "", err }
+	if err != nil {
+		return nil, "", err
+	}
 	defer tx.Rollback(ctx)
 
 	var tenantID, role string
@@ -502,15 +526,21 @@ func (s *Store) AcceptInvitationForUser(invitationID, userID string) (*model.Ses
 		return nil, "", err
 	}
 	if time.Now().After(expiresAt) {
-		if _, err := tx.Exec(ctx, `DELETE FROM invitations WHERE id=$1`, invitationID); err != nil { return nil, "", err }
-		if err := tx.Commit(ctx); err != nil { return nil, "", err }
+		if _, err := tx.Exec(ctx, `DELETE FROM invitations WHERE id=$1`, invitationID); err != nil {
+			return nil, "", err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, "", err
+		}
 		return nil, "", pgx.ErrNoRows
 	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO tenant_members (tenant_id,user_id,role,status) VALUES ($1,$2,$3,'active')
 		 ON CONFLICT (tenant_id, user_id) DO UPDATE SET role=$3, status='active'`,
 		tenantID, userID, role,
-	); err != nil { return nil, "", err }
+	); err != nil {
+		return nil, "", err
+	}
 
 	sess := &model.SessionRow{
 		ID: genToken(), UserID: userID, CSRFToken: genToken(), ActiveTenantID: tenantID,
@@ -519,11 +549,19 @@ func (s *Store) AcceptInvitationForUser(invitationID, userID string) (*model.Ses
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO sessions (id,user_id,csrf_token,active_tenant_id,expires_at) VALUES ($1,$2,$3,$4,$5)`,
 		sess.ID, sess.UserID, sess.CSRFToken, sess.ActiveTenantID, sess.ExpiresAt,
-	); err != nil { return nil, "", err }
+	); err != nil {
+		return nil, "", err
+	}
 	command, err := tx.Exec(ctx, `DELETE FROM invitations WHERE id=$1`, invitationID)
-	if err != nil { return nil, "", err }
-	if command.RowsAffected() == 0 { return nil, "", pgx.ErrNoRows }
-	if err := tx.Commit(ctx); err != nil { return nil, "", err }
+	if err != nil {
+		return nil, "", err
+	}
+	if command.RowsAffected() == 0 {
+		return nil, "", pgx.ErrNoRows
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, "", err
+	}
 	return sess, tenantID, nil
 }
 
@@ -550,7 +588,7 @@ func (s *Store) AllAccounts() ([]model.AccountRow, error) {
 	return list, rows.Err()
 }
 
-func (s *Store) AccountsByTenant( tenantID string) ([]model.Account, error) {
+func (s *Store) AccountsByTenant(tenantID string) ([]model.Account, error) {
 	rows, err := s.pool.Query(context.Background(),
 		`SELECT a.id,a.name,a.account_key,a.status,a.daily_limit,
 		        (SELECT COUNT(*) FROM conversation_messages cm WHERE cm.tenant_id=$1 AND cm.account_id=a.id AND cm.role='assistant' AND cm.created_at >= date_trunc('day', CURRENT_TIMESTAMP)),
@@ -579,7 +617,7 @@ func (s *Store) AccountsByTenant( tenantID string) ([]model.Account, error) {
 	return list, rows.Err()
 }
 
-func (s *Store) CreateAccount( tenantID, name, kbID string, dailyLimit, replyLimit int) (*model.AccountRow, error) {
+func (s *Store) CreateAccount(tenantID, name, kbID string, dailyLimit, replyLimit int) (*model.AccountRow, error) {
 	a := &model.AccountRow{
 		ID: genID(), TenantID: tenantID, Name: name, KbID: kbID,
 		AccountKey: "wa_" + genID()[:8], Status: "pending", DailyLimit: dailyLimit, ReplyLimit: replyLimit,
@@ -596,7 +634,7 @@ func (s *Store) CreateAccount( tenantID, name, kbID string, dailyLimit, replyLim
 	return a, nil
 }
 
-func (s *Store) AccountByID( tenantID, accountID string) (*model.AccountRow, error) {
+func (s *Store) AccountByID(tenantID, accountID string) (*model.AccountRow, error) {
 	a := &model.AccountRow{}
 	err := s.pool.QueryRow(context.Background(),
 		`SELECT id,tenant_id,name,account_key,status,daily_limit,kb_id,reply_limit,
@@ -618,26 +656,48 @@ func (s *Store) TenantIDByAccountID(accountID string) (string, error) {
 	return tenantID, err
 }
 
-func (s *Store) UpdateAccount( tenantID, accountID, name, status string, kbID *string, dailyLimit, replyLimit *int) (*model.AccountRow, error) {
+func (s *Store) UpdateAccount(tenantID, accountID, name, status string, kbID *string, dailyLimit, replyLimit *int) (*model.AccountRow, error) {
 	q := `UPDATE accounts SET `
 	args := []any{}
 	idx := 1
-	if name != "" { q += fmt.Sprintf(`name=$%d, `, idx); args = append(args, name); idx++ }
-	if kbID != nil { q += fmt.Sprintf(`kb_id=$%d, `, idx); args = append(args, *kbID); idx++ }
-	if status != "" { q += fmt.Sprintf(`status=$%d, `, idx); args = append(args, status); idx++ }
-	if dailyLimit != nil { q += fmt.Sprintf(`daily_limit=$%d, `, idx); args = append(args, *dailyLimit); idx++ }
-	if replyLimit != nil { q += fmt.Sprintf(`reply_limit=$%d, `, idx); args = append(args, *replyLimit); idx++ }
+	if name != "" {
+		q += fmt.Sprintf(`name=$%d, `, idx)
+		args = append(args, name)
+		idx++
+	}
+	if kbID != nil {
+		q += fmt.Sprintf(`kb_id=$%d, `, idx)
+		args = append(args, *kbID)
+		idx++
+	}
+	if status != "" {
+		q += fmt.Sprintf(`status=$%d, `, idx)
+		args = append(args, status)
+		idx++
+	}
+	if dailyLimit != nil {
+		q += fmt.Sprintf(`daily_limit=$%d, `, idx)
+		args = append(args, *dailyLimit)
+		idx++
+	}
+	if replyLimit != nil {
+		q += fmt.Sprintf(`reply_limit=$%d, `, idx)
+		args = append(args, *replyLimit)
+		idx++
+	}
 	q = q[:len(q)-2] + fmt.Sprintf(` WHERE id=$%d AND tenant_id=$%d RETURNING id,tenant_id,name,account_key,status,daily_limit,kb_id,reply_limit,to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')`, idx, idx+1)
 	args = append(args, accountID, tenantID)
 	a := &model.AccountRow{}
 	err := s.pool.QueryRow(context.Background(), q, args...).Scan(&a.ID, &a.TenantID, &a.Name, &a.AccountKey, &a.Status, &a.DailyLimit, &a.KbID, &a.ReplyLimit, &a.CreatedAt)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	return a, nil
 }
 
 // ---- knowledge bases ----
 
-func (s *Store) KnowledgeBasesByTenant( tenantID string) ([]model.KnowledgeBase, error) {
+func (s *Store) KnowledgeBasesByTenant(tenantID string) ([]model.KnowledgeBase, error) {
 	rows, err := s.pool.Query(context.Background(),
 		`SELECT id,name,description,status,
 		        to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')
@@ -657,7 +717,7 @@ func (s *Store) KnowledgeBasesByTenant( tenantID string) ([]model.KnowledgeBase,
 	return list, rows.Err()
 }
 
-func (s *Store) CreateKnowledgeBase( tenantID, name, description string) (*model.KnowledgeRow, error) {
+func (s *Store) CreateKnowledgeBase(tenantID, name, description string) (*model.KnowledgeRow, error) {
 	k := &model.KnowledgeRow{
 		ID: genID(), TenantID: tenantID, Name: name,
 		Description: description, Status: "active",
@@ -690,7 +750,9 @@ func (s *Store) SearchKnowledgeForBases(tenantID string, baseIDs []string, query
 }
 
 func (s *Store) searchKnowledge(tenantID string, baseIDs []string, query string, embedding []float32, limit int) ([]model.SearchResultItem, error) {
-	if limit <= 0 { limit = 5 }
+	if limit <= 0 {
+		limit = 5
+	}
 	// Vector search via Go cosine similarity if embedding provided.
 	if len(embedding) > 0 {
 		vectorArgs := []any{tenantID}
@@ -701,55 +763,65 @@ func (s *Store) searchKnowledge(tenantID string, baseIDs []string, query string,
 		}
 		rows, err := s.pool.Query(context.Background(),
 			"SELECT a.id, a.title, a.content, a.category, a.attributes, k.name AS kb_name, c.id, c.embedding FROM knowledge_chunks c JOIN knowledge_articles a ON c.article_id = a.id JOIN knowledge_bases k ON a.knowledge_base_id = k.id WHERE k.tenant_id=$1 AND a.status='active' AND k.status='active' AND c.embedding IS NOT NULL"+baseFilter, vectorArgs...)
-			if err == nil {
-				defer rows.Close()
-				type row struct {
-					artID, title, content, category, attrs, kbName, chunkID, emb string
+		if err == nil {
+			defer rows.Close()
+			type row struct {
+				artID, title, content, category, attrs, kbName, chunkID, emb string
+			}
+			var chunks []row
+			for rows.Next() {
+				var r row
+				if err := rows.Scan(&r.artID, &r.title, &r.content, &r.category, &r.attrs, &r.kbName, &r.chunkID, &r.emb); err != nil {
+					continue
 				}
-				var chunks []row
-				for rows.Next() {
-					var r row
-					if err := rows.Scan(&r.artID, &r.title, &r.content, &r.category, &r.attrs, &r.kbName, &r.chunkID, &r.emb); err != nil {
-						continue
+				chunks = append(chunks, r)
+			}
+			rows.Close()
+			type scored struct {
+				item  model.SearchResultItem
+				score float64
+			}
+			var results []scored
+			for _, ck := range chunks {
+				var embVec []float64
+				if json.Unmarshal([]byte(ck.emb), &embVec) == nil && len(embVec) > 0 {
+					queryVec := make([]float64, len(embedding))
+					for i_, v := range embedding {
+						queryVec[i_] = float64(v)
 					}
-					chunks = append(chunks, r)
+					sim := cosineSimilarity(queryVec, embVec)
+					results = append(results, scored{
+						item:  model.SearchResultItem{ID: ck.artID, Title: ck.title, Content: ck.content, Category: ck.category, Attributes: ck.attrs, KnowledgeBaseName: ck.kbName, Score: sim},
+						score: sim,
+					})
 				}
-				rows.Close()
-				type scored struct {
-					item  model.SearchResultItem
-					score float64
-				}
-				var results []scored
-				for _, ck := range chunks {
-					var embVec []float64
-					if json.Unmarshal([]byte(ck.emb), &embVec) == nil && len(embVec) > 0 {
-						queryVec := make([]float64, len(embedding))
-						for i_, v := range embedding { queryVec[i_] = float64(v) }
-						sim := cosineSimilarity(queryVec, embVec)
-						results = append(results, scored{
-							item:  model.SearchResultItem{ID: ck.artID, Title: ck.title, Content: ck.content, Category: ck.category, Attributes: ck.attrs, KnowledgeBaseName: ck.kbName, Score: sim},
-							score: sim,
-						})
+			}
+			sort.Slice(results, func(i_, j_ int) bool { return results[i_].score > results[j_].score })
+			seen := map[string]bool{}
+			var list []model.SearchResultItem
+			for _, s := range results {
+				if !seen[s.item.ID] {
+					seen[s.item.ID] = true
+					list = append(list, s.item)
+					if len(list) >= limit {
+						break
 					}
 				}
-				sort.Slice(results, func(i_, j_ int) bool { return results[i_].score > results[j_].score })
-				seen := map[string]bool{}
-				var list []model.SearchResultItem
-				for _, s := range results {
-					if !seen[s.item.ID] {
-						seen[s.item.ID] = true
-						list = append(list, s.item)
-						if len(list) >= limit { break }
-					}
-				}
-				if len(list) > 0 { return list, nil }
+			}
+			if len(list) > 0 {
+				return list, nil
+			}
 		}
 	}
 	// ILIKE fallback for Chinese text
 	words := splitQuery(query)
 	// Cap at 10 tokens to avoid SQL explosion; pg_trgm GIN indexes handle ILIKE efficiently
-	if len(words) > 10 { words = words[:10] }
-	if len(words) == 0 { return []model.SearchResultItem{}, nil }
+	if len(words) > 10 {
+		words = words[:10]
+	}
+	if len(words) == 0 {
+		return []model.SearchResultItem{}, nil
+	}
 	scoreParts := make([]string, len(words))
 	likeParts := make([]string, len(words))
 	args := []any{tenantID, limit}
@@ -769,7 +841,9 @@ func (s *Store) searchKnowledge(tenantID string, baseIDs []string, query string,
 	}
 	sql := fmt.Sprintf("SELECT a.id, a.title, a.content, a.category, a.attributes, k.name AS kb_name, (%s) AS score FROM knowledge_articles a JOIN knowledge_bases k ON a.knowledge_base_id = k.id WHERE k.tenant_id=$1 AND a.status='active' AND k.status='active'%s AND (%s) ORDER BY score DESC LIMIT $2", strings.Join(scoreParts, " + "), baseFilter, strings.Join(likeParts, " AND "))
 	rows, err := s.pool.Query(context.Background(), sql, args...)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 	var list []model.SearchResultItem
 	for rows.Next() {
@@ -779,17 +853,23 @@ func (s *Store) searchKnowledge(tenantID string, baseIDs []string, query string,
 		}
 		list = append(list, item)
 	}
-	if list == nil { list = []model.SearchResultItem{} }
+	if list == nil {
+		list = []model.SearchResultItem{}
+	}
 	return list, rows.Err()
 }
 
 func chunkArticleTx(ctx context.Context, tx pgx.Tx, articleID, content string) error {
-	if _, err := tx.Exec(ctx, "DELETE FROM knowledge_chunks WHERE article_id=$1", articleID); err != nil { return err }
+	if _, err := tx.Exec(ctx, "DELETE FROM knowledge_chunks WHERE article_id=$1", articleID); err != nil {
+		return err
+	}
 	chunks := splitContent(content, 500)
 	for i, c := range chunks {
 		if _, err := tx.Exec(ctx,
 			"INSERT INTO knowledge_chunks (id,article_id,content,chunk_index) VALUES ($1,$2,$3,$4)",
-			genID(), articleID, c, i); err != nil { return err }
+			genID(), articleID, c, i); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -798,32 +878,42 @@ func chunkArticleTx(ctx context.Context, tx pgx.Tx, articleID, content string) e
 func (s *Store) ChunkArticle(articleID, content string) error {
 	ctx := context.Background()
 	tx, err := s.pool.Begin(ctx)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	defer tx.Rollback(ctx)
-	if err := chunkArticleTx(ctx, tx, articleID, content); err != nil { return err }
+	if err := chunkArticleTx(ctx, tx, articleID, content); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 
 // UpdateChunkEmbedding sets the embedding vector for a chunk.
-func (s *Store) UpdateChunkEmbedding( chunkID string, embedding []float32) error {
+func (s *Store) UpdateChunkEmbedding(chunkID string, embedding []float32) error {
 	b, err := json.Marshal(embedding)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	_, err = s.pool.Exec(context.Background(),
 		"UPDATE knowledge_chunks SET embedding=$1 WHERE id=$2", string(b), chunkID)
 	return err
 }
 
 // GetChunksWithoutEmbeddings returns chunks that need embedding.
-func (s *Store) GetChunksWithoutEmbeddings( tenantID string, limit int) ([]ChunkInfo, error) {
+func (s *Store) GetChunksWithoutEmbeddings(tenantID string, limit int) ([]ChunkInfo, error) {
 	rows, err := s.pool.Query(context.Background(),
 		"SELECT c.id, c.content FROM knowledge_chunks c JOIN knowledge_articles a ON c.article_id = a.id JOIN knowledge_bases k ON a.knowledge_base_id = k.id WHERE k.tenant_id=$1 AND c.embedding IS NULL LIMIT $2",
 		tenantID, limit)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 	var list []ChunkInfo
 	for rows.Next() {
 		var item ChunkInfo
-		if err := rows.Scan(&item.ID, &item.Content); err != nil { return nil, err }
+		if err := rows.Scan(&item.ID, &item.Content); err != nil {
+			return nil, err
+		}
 		list = append(list, item)
 	}
 	return list, rows.Err()
@@ -837,12 +927,13 @@ func splitContent(text string, maxLen int) []string {
 	runes := []rune(text)
 	for i := 0; i < len(runes); i += maxLen {
 		end := i + maxLen
-		if end > len(runes) { end = len(runes) }
+		if end > len(runes) {
+			end = len(runes)
+		}
 		chunks = append(chunks, string(runes[i:end]))
 	}
 	return chunks
 }
-
 
 func splitQuery(q string) []string {
 	sep := func(r rune) bool {
@@ -854,25 +945,36 @@ func splitQuery(q string) []string {
 	var result []string
 	for _, p := range parts {
 		p = strings.TrimSpace(p)
-		if len(p) == 0 { continue }
-		if !seen[p] { result = append(result, p); seen[p] = true }
+		if len(p) == 0 {
+			continue
+		}
+		if !seen[p] {
+			result = append(result, p)
+			seen[p] = true
+		}
 		// For Chinese text (>2 chars), add bigrams and unigrams for fuzzy matching
 		runes := []rune(p)
 		if len(runes) > 2 {
 			for i := 0; i < len(runes)-1; i++ {
 				bigram := string(runes[i : i+2])
-				if !seen[bigram] { result = append(result, bigram); seen[bigram] = true }
+				if !seen[bigram] {
+					result = append(result, bigram)
+					seen[bigram] = true
+				}
 			}
 			for _, r := range runes {
 				ch := string(r)
-				if !seen[ch] { result = append(result, ch); seen[ch] = true }
+				if !seen[ch] {
+					result = append(result, ch)
+					seen[ch] = true
+				}
 			}
 		}
 	}
 	return result
 }
 
-func (s *Store) SaveMessage( tenantID, accountID, conversationID, customerName, role, content, knowledgeIDs string) (*model.ConversationMessage, error) {
+func (s *Store) SaveMessage(tenantID, accountID, conversationID, customerName, role, content, knowledgeIDs string) (*model.ConversationMessage, error) {
 	m := &model.ConversationMessage{
 		ID: genID(), ConversationID: conversationID, CustomerName: customerName,
 		Role: role, Content: content, KnowledgeIDs: knowledgeIDs,
@@ -881,7 +983,9 @@ func (s *Store) SaveMessage( tenantID, accountID, conversationID, customerName, 
 		"INSERT INTO conversation_messages (id,tenant_id,account_id,conversation_id,customer_name,role,content,knowledge_ids) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')",
 		m.ID, tenantID, accountID, m.ConversationID, m.CustomerName, m.Role, m.Content, m.KnowledgeIDs,
 	).Scan(&m.CreatedAt)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	return m, nil
 }
 
@@ -890,7 +994,9 @@ func (s *Store) SaveMessage( tenantID, accountID, conversationID, customerName, 
 func (s *Store) SaveAssistantReply(tenantID, accountID, conversationID, customerName, content, knowledgeIDs string) (*model.ConversationMessage, error) {
 	ctx := context.Background()
 	tx, err := s.pool.Begin(ctx)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer tx.Rollback(ctx)
 
 	var dailyLimit int
@@ -902,7 +1008,9 @@ func (s *Store) SaveAssistantReply(tenantID, accountID, conversationID, customer
 		if err := tx.QueryRow(ctx,
 			`SELECT COUNT(*) FROM conversation_messages WHERE tenant_id=$1 AND account_id=$2 AND role='assistant' AND created_at >= date_trunc('day', CURRENT_TIMESTAMP)`,
 			tenantID, accountID,
-		).Scan(&repliesToday); err != nil { return nil, err }
+		).Scan(&repliesToday); err != nil {
+			return nil, err
+		}
 		if dailyReplyLimitReached(dailyLimit, repliesToday) {
 			return nil, ErrDailyReplyLimitReached
 		}
@@ -915,8 +1023,12 @@ func (s *Store) SaveAssistantReply(tenantID, accountID, conversationID, customer
 	if err := tx.QueryRow(ctx,
 		"INSERT INTO conversation_messages (id,tenant_id,account_id,conversation_id,customer_name,role,content,knowledge_ids) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')",
 		m.ID, tenantID, accountID, m.ConversationID, m.CustomerName, m.Role, m.Content, m.KnowledgeIDs,
-	).Scan(&m.CreatedAt); err != nil { return nil, err }
-	if err := tx.Commit(ctx); err != nil { return nil, err }
+	).Scan(&m.CreatedAt); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
 	return m, nil
 }
 
@@ -943,12 +1055,16 @@ func (s *Store) SaveMessageIfAbsent(tenantID, accountID, conversationID, custome
 	return err
 }
 
-func (s *Store) LoadHistory( tenantID, accountID, conversationID string, limit int) ([]model.ConversationMessage, error) {
-	if limit <= 0 { limit = 20 }
+func (s *Store) LoadHistory(tenantID, accountID, conversationID string, limit int) ([]model.ConversationMessage, error) {
+	if limit <= 0 {
+		limit = 20
+	}
 	rows, err := s.pool.Query(context.Background(),
 		"SELECT id,conversation_id,account_id,customer_name,role,content,knowledge_ids,to_char(created_at, 'YYYY-MM-DD HH24:MI:SS') FROM conversation_messages WHERE tenant_id=$1 AND account_id=$2 AND conversation_id=$3 ORDER BY created_at DESC LIMIT $4",
 		tenantID, accountID, conversationID, limit)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 	var list []model.ConversationMessage
 	for rows.Next() {
@@ -958,11 +1074,13 @@ func (s *Store) LoadHistory( tenantID, accountID, conversationID string, limit i
 		}
 		list = append(list, m)
 	}
-	if list == nil { list = []model.ConversationMessage{} }
+	if list == nil {
+		list = []model.ConversationMessage{}
+	}
 	return list, rows.Err()
 }
 
-func (s *Store) ListConversationSummaries( tenantID, accountID string) ([]model.ConversationSummary, error) {
+func (s *Store) ListConversationSummaries(tenantID, accountID string) ([]model.ConversationSummary, error) {
 	q := `SELECT cm.conversation_id, (SELECT customer_name FROM conversation_messages cm4 WHERE cm4.tenant_id=$1 AND cm4.account_id=cm.account_id AND cm4.conversation_id=cm.conversation_id ORDER BY created_at DESC LIMIT 1) AS customer_name, cm.account_id, (SELECT content FROM conversation_messages cm2 WHERE cm2.tenant_id=$1 AND cm2.account_id=cm.account_id AND cm2.conversation_id=cm.conversation_id ORDER BY created_at DESC LIMIT 1) AS last_message, (SELECT to_char(created_at, 'YYYY-MM-DD HH24:MI:SS') FROM conversation_messages cm3 WHERE cm3.tenant_id=$1 AND cm3.account_id=cm.account_id AND cm3.conversation_id=cm.conversation_id ORDER BY created_at DESC LIMIT 1) AS last_message_at, COUNT(*) AS message_count FROM conversation_messages cm WHERE tenant_id=$1`
 	args := []any{tenantID}
 	if accountID != "" {
@@ -971,7 +1089,9 @@ func (s *Store) ListConversationSummaries( tenantID, accountID string) ([]model.
 	}
 	q += ` GROUP BY cm.conversation_id, cm.account_id ORDER BY last_message_at DESC`
 	rows, err := s.pool.Query(context.Background(), q, args...)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 	var list []model.ConversationSummary
 	for rows.Next() {
@@ -980,24 +1100,25 @@ func (s *Store) ListConversationSummaries( tenantID, accountID string) ([]model.
 		if err := rows.Scan(&s.ConversationID, &s.CustomerName, &s.AccountID, &s.LastMessage, &lastAt, &s.MessageCount); err != nil {
 			return nil, err
 		}
-		if lastAt != nil { s.LastMessageAt = *lastAt }
+		if lastAt != nil {
+			s.LastMessageAt = *lastAt
+		}
 		list = append(list, s)
 	}
-	if list == nil { list = []model.ConversationSummary{} }
+	if list == nil {
+		list = []model.ConversationSummary{}
+	}
 	return list, rows.Err()
 }
 
-func (s *Store) DeleteConversation( tenantID, accountID, conversationID string) error {
+func (s *Store) DeleteConversation(tenantID, accountID, conversationID string) error {
 	_, err := s.pool.Exec(context.Background(),
 		"DELETE FROM conversation_messages WHERE tenant_id=$1 AND account_id=$2 AND conversation_id=$3",
 		tenantID, accountID, conversationID)
 	return err
 }
 
-
-
-
-func (s *Store) KnowledgeBaseByID( id, tenantID string) (*model.KnowledgeRow, error) {
+func (s *Store) KnowledgeBaseByID(id, tenantID string) (*model.KnowledgeRow, error) {
 	k := &model.KnowledgeRow{}
 	err := s.pool.QueryRow(context.Background(),
 		`SELECT id,tenant_id,name,description,status,
@@ -1010,22 +1131,36 @@ func (s *Store) KnowledgeBaseByID( id, tenantID string) (*model.KnowledgeRow, er
 	return k, nil
 }
 
-func (s *Store) UpdateKnowledgeBase( id, tenantID string, name, description, status *string) (*model.KnowledgeRow, error) {
+func (s *Store) UpdateKnowledgeBase(id, tenantID string, name, description, status *string) (*model.KnowledgeRow, error) {
 	q := `UPDATE knowledge_bases SET `
 	args := []any{}
 	idx := 1
-	if name != nil { q += fmt.Sprintf(`name=$%d, `, idx); args = append(args, *name); idx++ }
-	if description != nil { q += fmt.Sprintf(`description=$%d, `, idx); args = append(args, *description); idx++ }
-	if status != nil { q += fmt.Sprintf(`status=$%d, `, idx); args = append(args, *status); idx++ }
+	if name != nil {
+		q += fmt.Sprintf(`name=$%d, `, idx)
+		args = append(args, *name)
+		idx++
+	}
+	if description != nil {
+		q += fmt.Sprintf(`description=$%d, `, idx)
+		args = append(args, *description)
+		idx++
+	}
+	if status != nil {
+		q += fmt.Sprintf(`status=$%d, `, idx)
+		args = append(args, *status)
+		idx++
+	}
 	q = q[:len(q)-2] + fmt.Sprintf(` WHERE id=$%d AND tenant_id=$%d RETURNING id,tenant_id,name,description,status,to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')`, idx, idx+1)
 	args = append(args, id, tenantID)
 	k := &model.KnowledgeRow{}
 	err := s.pool.QueryRow(context.Background(), q, args...).Scan(&k.ID, &k.TenantID, &k.Name, &k.Description, &k.Status, &k.CreatedAt)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	return k, nil
 }
 
-func (s *Store) DeleteKnowledgeBase( id, tenantID string) error {
+func (s *Store) DeleteKnowledgeBase(id, tenantID string) error {
 	ctx := context.Background()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1048,7 +1183,7 @@ func (s *Store) DeleteKnowledgeBase( id, tenantID string) error {
 	return tx.Commit(ctx)
 }
 
-func (s *Store) ArticlesByKnowledgeBase( kbID, tenantID string) ([]model.KnowledgeArticle, error) {
+func (s *Store) ArticlesByKnowledgeBase(kbID, tenantID string) ([]model.KnowledgeArticle, error) {
 	rows, err := s.pool.Query(context.Background(),
 		`SELECT a.id,a.knowledge_base_id,a.title,a.content,a.category,a.attributes,a.status,
 		        to_char(a.created_at, 'YYYY-MM-DD HH24:MI:SS'),
@@ -1057,7 +1192,9 @@ func (s *Store) ArticlesByKnowledgeBase( kbID, tenantID string) ([]model.Knowled
 		 JOIN knowledge_bases k ON a.knowledge_base_id = k.id
 		 WHERE a.knowledge_base_id=$1 AND k.tenant_id=$2
 		 ORDER BY a.created_at`, kbID, tenantID)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 	var list []model.KnowledgeArticle
 	for rows.Next() {
@@ -1067,14 +1204,18 @@ func (s *Store) ArticlesByKnowledgeBase( kbID, tenantID string) ([]model.Knowled
 		}
 		list = append(list, a)
 	}
-	if list == nil { list = []model.KnowledgeArticle{} }
+	if list == nil {
+		list = []model.KnowledgeArticle{}
+	}
 	return list, rows.Err()
 }
 
-func (s *Store) CreateArticle( kbID, title, content, category, attributes string) (*model.KnowledgeArticleRow, error) {
+func (s *Store) CreateArticle(kbID, title, content, category, attributes string) (*model.KnowledgeArticleRow, error) {
 	ctx := context.Background()
 	tx, err := s.pool.Begin(ctx)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer tx.Rollback(ctx)
 	a := &model.KnowledgeArticleRow{
 		ID: genID(), KnowledgeBaseID: kbID, Title: title,
@@ -1087,34 +1228,96 @@ func (s *Store) CreateArticle( kbID, title, content, category, attributes string
 		           to_char(updated_at, 'YYYY-MM-DD HH24:MI:SS')`,
 		a.ID, a.KnowledgeBaseID, a.Title, a.Content, a.Category, a.Attributes,
 	).Scan(&a.CreatedAt, &a.UpdatedAt)
-	if err != nil { return nil, err }
-	if err := chunkArticleTx(ctx, tx, a.ID, content); err != nil { return nil, err }
-	if err := tx.Commit(ctx); err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
+	if err := chunkArticleTx(ctx, tx, a.ID, content); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
 	return a, nil
+}
+
+// CreateArticles imports a fully validated batch in one transaction so a
+// malformed database write cannot leave users with a partial import.
+func (s *Store) CreateArticles(kbID string, articles []model.CreateArticleRequest) error {
+	if len(articles) == 0 {
+		return nil
+	}
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	for _, article := range articles {
+		id := genID()
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO knowledge_articles (id,knowledge_base_id,title,content,category,attributes)
+			 VALUES ($1,$2,$3,$4,$5,$6)`,
+			id, kbID, article.Title, article.Content, article.Category, article.Attributes,
+		); err != nil {
+			return err
+		}
+		if err := chunkArticleTx(ctx, tx, id, article.Content); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *Store) UpdateArticle(id, kbID, tenantID string, title, content, category, attributes, status *string) (*model.KnowledgeArticleRow, error) {
 	ctx := context.Background()
 	tx, err := s.pool.Begin(ctx)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer tx.Rollback(ctx)
 	q := `UPDATE knowledge_articles SET updated_at=NOW(), `
 	args := []any{}
 	idx := 1
-	if title != nil { q += fmt.Sprintf(`title=$%d, `, idx); args = append(args, *title); idx++ }
-	if content != nil { q += fmt.Sprintf(`content=$%d, `, idx); args = append(args, *content); idx++ }
-	if category != nil { q += fmt.Sprintf(`category=$%d, `, idx); args = append(args, *category); idx++ }
-	if attributes != nil { q += fmt.Sprintf(`attributes=$%d, `, idx); args = append(args, *attributes); idx++ }
-	if status != nil { q += fmt.Sprintf(`status=$%d, `, idx); args = append(args, *status); idx++ }
+	if title != nil {
+		q += fmt.Sprintf(`title=$%d, `, idx)
+		args = append(args, *title)
+		idx++
+	}
+	if content != nil {
+		q += fmt.Sprintf(`content=$%d, `, idx)
+		args = append(args, *content)
+		idx++
+	}
+	if category != nil {
+		q += fmt.Sprintf(`category=$%d, `, idx)
+		args = append(args, *category)
+		idx++
+	}
+	if attributes != nil {
+		q += fmt.Sprintf(`attributes=$%d, `, idx)
+		args = append(args, *attributes)
+		idx++
+	}
+	if status != nil {
+		q += fmt.Sprintf(`status=$%d, `, idx)
+		args = append(args, *status)
+		idx++
+	}
 	q = q[:len(q)-2] + fmt.Sprintf(` WHERE id=$%d AND knowledge_base_id=$%d AND EXISTS (SELECT 1 FROM knowledge_bases WHERE id=$%d AND tenant_id=$%d) RETURNING id,knowledge_base_id,title,content,category,attributes,status,to_char(created_at, 'YYYY-MM-DD HH24:MI:SS'),to_char(updated_at, 'YYYY-MM-DD HH24:MI:SS')`, idx, idx+1, idx+1, idx+2)
 	args = append(args, id, kbID, tenantID)
 	a := &model.KnowledgeArticleRow{}
 	err = tx.QueryRow(ctx, q, args...).Scan(&a.ID, &a.KnowledgeBaseID, &a.Title, &a.Content, &a.Category, &a.Attributes, &a.Status, &a.CreatedAt, &a.UpdatedAt)
-	if err != nil { return nil, err }
-	if content != nil {
-		if err := chunkArticleTx(ctx, tx, a.ID, *content); err != nil { return nil, err }
+	if err != nil {
+		return nil, err
 	}
-	if err := tx.Commit(ctx); err != nil { return nil, err }
+	if content != nil {
+		if err := chunkArticleTx(ctx, tx, a.ID, *content); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
 	return a, nil
 }
 
@@ -1138,8 +1341,7 @@ func (s *Store) DeleteArticle(id, kbID, tenantID string) error {
 	return tx.Commit(ctx)
 }
 
-
-func (s *Store) ConversationsByTenant( tenantID string) ([]model.Conversation, error) {
+func (s *Store) ConversationsByTenant(tenantID string) ([]model.Conversation, error) {
 	rows, err := s.pool.Query(context.Background(),
 		`SELECT id,account_id,customer,last_message,status,
 		        to_char(last_message_at, 'YYYY-MM-DD HH24:MI:SS')
@@ -1160,13 +1362,17 @@ func (s *Store) ConversationsByTenant( tenantID string) ([]model.Conversation, e
 }
 
 func cosineSimilarity(a, b []float64) float64 {
-	if len(a) != len(b) || len(a) == 0 { return 0 }
+	if len(a) != len(b) || len(a) == 0 {
+		return 0
+	}
 	var dot, normA, normB float64
 	for i := range a {
 		dot += a[i] * b[i]
 		normA += a[i] * a[i]
 		normB += b[i] * b[i]
 	}
-	if normA == 0 || normB == 0 { return 0 }
+	if normA == 0 || normB == 0 {
+		return 0
+	}
 	return dot / (math.Sqrt(normA) * math.Sqrt(normB))
 }

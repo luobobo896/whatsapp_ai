@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, inject } from "vue";
-import { Trash2 } from "lucide-vue-next";
+import { MessageCircle, Trash2 } from "lucide-vue-next";
 import { del, get } from "../api";
 import { formatDate } from "../utils";
 
@@ -141,5 +141,16 @@ async function deleteConversation(conv) {
         </div>
       </div>
     </div>
+    <template #footer>
+      <el-button @click="messagesOpen = false">关闭</el-button>
+      <el-button
+        v-if="canManage && selectedConv"
+        type="primary"
+        :icon="MessageCircle"
+        @click="emit('chat', selectedConv)"
+      >
+        继续处理
+      </el-button>
+    </template>
   </el-dialog>
 </template>

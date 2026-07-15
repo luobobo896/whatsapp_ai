@@ -48,6 +48,12 @@ async function fetchQr() {
   clearTimeout(connectionTimer);
   try {
     const resp = await post(`/api/accounts/${props.account.id}/qr-login`, {}, props.csrfToken);
+    if (resp.status === "connected") {
+      status.value = "connected";
+      showToast({ tone: "success", message: "WhatsApp 已连接" });
+      emit("connected");
+      return;
+    }
     qrData.value = resp.qrData;
     countdown.value = secondsUntil(resp.expiresAt);
     qrTotal.value = countdown.value;

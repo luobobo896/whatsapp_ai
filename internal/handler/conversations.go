@@ -15,6 +15,8 @@ import (
 	"whatsapp-ai-poc/internal/store"
 )
 
+var sendWhatsAppReply = sendOpenClawWhatsAppMessage
+
 func RegisterConversations(r *gin.RouterGroup, st *store.Store) {
 	RegisterConversationRead(r, st)
 	RegisterConversationManagement(r, st)
@@ -33,7 +35,59 @@ func RegisterConversationManagement(r *gin.RouterGroup, st *store.Store) {
 	r.POST("/query", handleConversationQuery(st))
 	r.POST("/messages", handleSaveMessage(st))
 	r.POST("/reply", handleSaveReply(st))
+	r.POST("/:id/send", handleSendConversationReply(st))
 	r.DELETE("/:id", handleDeleteConversation(st))
+}
+
+func handleSendConversationReply(st *store.Store) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		session := middleware.GetSession(c)
+		if session == nil || session.ActiveTenantID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "TENANT_REQUIRED", Message: "No tenant selected."}})
+			return
+		}
+		var req model.SendConversationReplyRequest
+		if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.AccountID) == "" || strings.TrimSpace(req.Content) == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "accountId and content are required."}})
+			return
+		}
+		conversationID := c.Param("id")
+		if _, err := normalizeWhatsAppTarget(conversationID); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: err.Error()}})
+			return
+		}
+		account, err := st.AccountByID(session.ActiveTenantID, req.AccountID)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": model.ErrorDetail{Code: "NOT_FOUND", Message: "Account not found."}})
+			return
+		}
+		if account.Status != "connected" {
+			c.JSON(http.StatusConflict, gin.H{"error": model.ErrorDetail{Code: "OPENCLAW_ERROR", Message: "WhatsApp account is not connected."}})
+			return
+		}
+		if err := st.CheckAssistantReplyCapacity(session.ActiveTenantID, account.ID); err != nil {
+			if errors.Is(err, store.ErrDailyReplyLimitReached) {
+				c.JSON(http.StatusTooManyRequests, gin.H{"error": model.ErrorDetail{Code: "DAILY_LIMIT_REACHED", Message: "Daily reply limit reached."}})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to check reply capacity."}})
+			return
+		}
+		if err := sendWhatsAppReply(account.AccountKey, conversationID, req.Content); err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": model.ErrorDetail{Code: "OPENCLAW_ERROR", Message: err.Error()}})
+			return
+		}
+		message, err := st.SaveAssistantReply(session.ActiveTenantID, account.ID, conversationID, req.CustomerName, req.Content, "[]")
+		if err != nil {
+			if errors.Is(err, store.ErrDailyReplyLimitReached) {
+				c.JSON(http.StatusTooManyRequests, gin.H{"error": model.ErrorDetail{Code: "DAILY_LIMIT_REACHED", Message: "Daily reply limit reached."}})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Message was sent but could not be saved."}})
+			return
+		}
+		c.JSON(http.StatusOK, message)
+	}
 }
 
 // RegisterInternalConversations registers conversation routes for internal
@@ -76,8 +130,12 @@ func handleInternalConversationQuery(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "message and conversationId are required."}})
 			return
 		}
-		if req.MaxHistory <= 0 { req.MaxHistory = 10 }
-		if req.MaxKnowledge <= 0 { req.MaxKnowledge = 5 }
+		if req.MaxHistory <= 0 {
+			req.MaxHistory = 10
+		}
+		if req.MaxKnowledge <= 0 {
+			req.MaxKnowledge = 5
+		}
 		if !validConversationHistory(req.History) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "History contains an invalid message."}})
 			return
@@ -125,7 +183,9 @@ func handleInternalConversationQuery(st *store.Store) gin.HandlerFunc {
 		if len(req.History) > 0 {
 			for _, m := range req.History {
 				role := m.Role
-				if role == "user" { role = "customer" }
+				if role == "user" {
+					role = "customer"
+				}
 				if err := st.SaveMessageIfAbsent(tenantID, req.AccountID, req.ConversationID, req.CustomerName, role, m.Content, "[]"); err != nil {
 					c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to save conversation history."}})
 					return
@@ -170,7 +230,9 @@ func handleInternalSaveReply(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Invalid accountId."}})
 			return
 		}
-		if req.KnowledgeIDs == "" { req.KnowledgeIDs = "[]" }
+		if req.KnowledgeIDs == "" {
+			req.KnowledgeIDs = "[]"
+		}
 		msg, err := st.SaveAssistantReply(tenantID, req.AccountID, req.ConversationID, req.CustomerName, req.Content, req.KnowledgeIDs)
 		if err != nil {
 			if errors.Is(err, store.ErrDailyReplyLimitReached) {
@@ -213,8 +275,12 @@ func handleConversationQuery(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "message and conversationId are required."}})
 			return
 		}
-		if req.MaxHistory <= 0 { req.MaxHistory = 10 }
-		if req.MaxKnowledge <= 0 { req.MaxKnowledge = 5 }
+		if req.MaxHistory <= 0 {
+			req.MaxHistory = 10
+		}
+		if req.MaxKnowledge <= 0 {
+			req.MaxKnowledge = 5
+		}
 		if !validConversationHistory(req.History) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "History contains an invalid message."}})
 			return
@@ -254,7 +320,9 @@ func handleConversationQuery(st *store.Store) gin.HandlerFunc {
 			// customer message (already saved above).
 			for _, m := range req.History {
 				role := m.Role
-				if role == "user" { role = "customer" }
+				if role == "user" {
+					role = "customer"
+				}
 				if err := st.SaveMessageIfAbsent(session.ActiveTenantID, req.AccountID, req.ConversationID, req.CustomerName, role, m.Content, "[]"); err != nil {
 					c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to save conversation history."}})
 					return
@@ -366,7 +434,9 @@ func handleSaveReply(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusNotFound, gin.H{"error": model.ErrorDetail{Code: "NOT_FOUND", Message: "Account not found."}})
 			return
 		}
-		if req.KnowledgeIDs == "" { req.KnowledgeIDs = "[]" }
+		if req.KnowledgeIDs == "" {
+			req.KnowledgeIDs = "[]"
+		}
 		msg, err := st.SaveAssistantReply(session.ActiveTenantID, req.AccountID, req.ConversationID, req.CustomerName, req.Content, req.KnowledgeIDs)
 		if err != nil {
 			if errors.Is(err, store.ErrDailyReplyLimitReached) {
@@ -438,9 +508,15 @@ func handleMessages(st *store.Store) gin.HandlerFunc {
 }
 
 func effectiveMessageLimit(requested, accountLimit int) int {
-	if accountLimit <= 0 { accountLimit = 30 }
-	if requested <= 0 { requested = 30 }
-	if requested > accountLimit { return accountLimit }
+	if accountLimit <= 0 {
+		accountLimit = 30
+	}
+	if requested <= 0 {
+		requested = 30
+	}
+	if requested > accountLimit {
+		return accountLimit
+	}
 	return requested
 }
 
@@ -494,11 +570,15 @@ func buildSystemPrompt(accountName, knowledgeText string) string {
 }
 
 func buildKnowledgeContext(results []model.SearchResultItem) string {
-	if len(results) == 0 { return "（暂无相关知识库内容）" }
+	if len(results) == 0 {
+		return "（暂无相关知识库内容）"
+	}
 	var sb strings.Builder
 	for i, r := range results {
 		sb.WriteString(fmt.Sprintf("\n### %d. %s [%s]\n", i+1, r.Title, r.KnowledgeBaseName))
-		if r.Category != "" { sb.WriteString(fmt.Sprintf("分类: %s\n", r.Category)) }
+		if r.Category != "" {
+			sb.WriteString(fmt.Sprintf("分类: %s\n", r.Category))
+		}
 		sb.WriteString(r.Content + "\n")
 		if r.Attributes != "" && r.Attributes != "{}" {
 			var attrs map[string]string
@@ -547,7 +627,7 @@ func isCJK(s string) bool {
 			(r >= 0x3400 && r <= 0x4DBF) || // CJK Unified Ideographs Extension A
 			(r >= 0x3040 && r <= 0x309F) || // Hiragana
 			(r >= 0x30A0 && r <= 0x30FF) || // Katakana
-			(r >= 0xAC00 && r <= 0xD7AF) {  // Hangul
+			(r >= 0xAC00 && r <= 0xD7AF) { // Hangul
 			cjk++
 		}
 	}

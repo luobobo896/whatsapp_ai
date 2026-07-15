@@ -1,8 +1,8 @@
 <script setup>
 import { ref, onMounted, inject } from "vue";
-import { ArrowLeft, Edit, Plus, Trash2 } from "lucide-vue-next";
+import { ArrowLeft, Download, Edit, Plus, Trash2, Upload } from "lucide-vue-next";
 import { ElMessageBox } from "element-plus";
-import { get, del, messageForError } from "../api";
+import { get, del, messageForError, postForm } from "../api";
 import { formatDate } from "../utils";
 import ArticleDialog from "../components/ArticleDialog.vue";
 
@@ -18,6 +18,8 @@ const articles = ref([]);
 const loading = ref(true);
 const articleDialogOpen = ref(false);
 const editingArticle = ref(null);
+const importInput = ref(null);
+const importing = ref(false);
 
 onMounted(async () => {
   await loadArticles();
@@ -43,6 +45,38 @@ function openCreate() {
 function openEdit(article) {
   editingArticle.value = article;
   articleDialogOpen.value = true;
+}
+
+function chooseImportFiles() {
+  importInput.value?.click();
+}
+
+async function importFiles(event) {
+  const files = [...(event.target.files || [])];
+  event.target.value = "";
+  if (!files.length) return;
+  const form = new FormData();
+  files.forEach((file) => form.append("files", file));
+  importing.value = true;
+  try {
+    const result = await postForm(`/api/knowledge/bases/${props.base.id}/import`, form, props.csrfToken);
+    showToast({ tone: "success", message: `已导入 ${result.created} 条知识` });
+    await loadArticles();
+    emit("articles-changed");
+  } catch (error) {
+    showToast({ tone: "error", message: messageForError(error) });
+  } finally {
+    importing.value = false;
+  }
+}
+
+function downloadCsvTemplate() {
+  const file = new Blob(["title,content,category,attributes\n示例商品,商品说明,示例分类,{}\n"], { type: "text/csv;charset=utf-8" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(file);
+  link.download = "knowledge-import-template.csv";
+  link.click();
+  URL.revokeObjectURL(link.href);
 }
 
 async function removeArticle(article) {
@@ -96,7 +130,13 @@ function onArticleSaved() {
       <template #header>
         <div style="display:flex;align-items:center;justify-content:space-between">
           <span style="font-weight:600">知识条目列表 ({{ articles.length }})</span>
-          <el-button v-if="canManage" type="primary" :icon="Plus" @click="openCreate">新建知识条目</el-button>
+          <div v-if="canManage" style="display:flex;gap:8px">
+            <el-tooltip content="可一次选择多个 CSV、JSON、Markdown 或文本文件；CSV 需要 title 和 content 列" placement="bottom">
+              <el-button :icon="Upload" :loading="importing" @click="chooseImportFiles">批量导入</el-button>
+            </el-tooltip>
+            <el-button text :icon="Download" @click="downloadCsvTemplate">CSV 模板</el-button>
+            <el-button type="primary" :icon="Plus" @click="openCreate">新建知识条目</el-button>
+          </div>
         </div>
       </template>
       <el-empty v-if="!loading && !articles.length" description="暂无知识条目，点击上方按钮添加" />
@@ -131,6 +171,14 @@ function onArticleSaved() {
       :csrf-token="csrfToken"
       @close="articleDialogOpen = false"
       @saved="onArticleSaved"
+    />
+    <input
+      ref="importInput"
+      type="file"
+      accept=".csv,.json,.md,.txt,text/csv,application/json,text/markdown,text/plain"
+      multiple
+      style="display:none"
+      @change="importFiles"
     />
   </div>
 </template>

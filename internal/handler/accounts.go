@@ -31,6 +31,7 @@ var qrBridgePathOnce sync.Once
 var qrBridgePath string
 var qrBridgePathErr error
 var openClawConfigMu sync.Mutex
+var openClawGatewayMu sync.Mutex
 
 var (
 	openClawAvailable   bool
@@ -198,11 +199,13 @@ func ensureOpenClawAccountAtPath(cfgPath, accountKey string) error {
 	defer openClawConfigMu.Unlock()
 
 	data, err := os.ReadFile(cfgPath)
-	if err != nil {
+	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	var cfg map[string]any
-	if err := json.Unmarshal(data, &cfg); err != nil {
+	if len(data) == 0 {
+		cfg = map[string]any{}
+	} else if err := json.Unmarshal(data, &cfg); err != nil {
 		return err
 	}
 
@@ -212,6 +215,9 @@ func ensureOpenClawAccountAtPath(cfgPath, accountKey string) error {
 
 	updated, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
 		return err
 	}
 	return os.WriteFile(cfgPath, updated, 0o600)
@@ -378,6 +384,10 @@ func restartAndWaitForOpenClawAccount(
 }
 
 func activateOpenClawAccount(accountKey string) error {
+	// OpenClaw owns one gateway process. Serializing activation prevents two
+	// completed QR sessions from restarting that shared process concurrently.
+	openClawGatewayMu.Lock()
+	defer openClawGatewayMu.Unlock()
 	if err := ensureOpenClawAccount(accountKey); err != nil {
 		return err
 	}
@@ -635,6 +645,49 @@ func disconnectOpenClawAccount(accountKey string) error {
 	return fmt.Errorf("断开 OpenClaw WhatsApp 账号失败: %s", message)
 }
 
+// normalizeWhatsAppTarget accepts the two customer identifiers OpenClaw
+// exposes for direct chats and rejects arbitrary conversation labels.
+func normalizeWhatsAppTarget(conversationID string) (string, error) {
+	target := strings.TrimSpace(conversationID)
+	target = strings.TrimSuffix(target, "@s.whatsapp.net")
+	target = strings.TrimSuffix(target, "@c.us")
+	target = strings.TrimPrefix(target, "+")
+	if len(target) < 7 || len(target) > 15 || target[0] == '0' {
+		return "", fmt.Errorf("会话不是可发送的 WhatsApp 手机号")
+	}
+	for _, r := range target {
+		if r < '0' || r > '9' {
+			return "", fmt.Errorf("会话不是可发送的 WhatsApp 手机号")
+		}
+	}
+	return "+" + target, nil
+}
+
+func sendOpenClawWhatsAppMessage(accountKey, conversationID, content string) error {
+	target, err := normalizeWhatsAppTarget(conversationID)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx,
+		"openclaw", "message", "send",
+		"--channel", "whatsapp",
+		"--account", accountKey,
+		"--target", target,
+		"--message", content,
+		"--json",
+	).CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	message := strings.TrimSpace(string(output))
+	if message == "" {
+		message = err.Error()
+	}
+	return fmt.Errorf("OpenClaw 发送失败: %s", message)
+}
+
 func RegisterAccounts(r *gin.RouterGroup, st *store.Store) {
 	r.GET("", handleListAccounts(st))
 	RegisterAccountManagement(r, st)
@@ -786,6 +839,19 @@ func handleQrLogin(st *store.Store) gin.HandlerFunc {
 		acct, err := st.AccountByID(session.ActiveTenantID, accountID)
 		if err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": model.ErrorDetail{Code: "NOT_FOUND", Message: "Account not found."}})
+			return
+		}
+		if !isOpenClawAvailable() {
+			c.JSON(http.StatusBadGateway, gin.H{"error": model.ErrorDetail{Code: "OPENCLAW_ERROR", Message: "openclaw 未安装或不可用"}})
+			return
+		}
+		live := readWhatsAppChannelStatus(acct.AccountKey)
+		if live.Known && live.Running && live.Connected {
+			if _, err := st.UpdateAccount(session.ActiveTenantID, accountID, "", "connected", nil, nil, nil); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to update account status."}})
+				return
+			}
+			c.JSON(http.StatusOK, model.QrLoginResponse{AccountID: accountID, Status: "connected"})
 			return
 		}
 

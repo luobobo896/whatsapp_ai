@@ -19,7 +19,7 @@ try {
   const { startWebLoginWithQr, waitForWebLogin } = await import(pathToFileURL(modulePath).href);
   const first = await startWebLoginWithQr({
     accountId,
-    force: true,
+    force: false,
     timeoutMs: 20000,
   });
 
