@@ -188,6 +188,12 @@ openclaw models auth --agent <agent-id> paste-api-key --provider deepseek
 cd frontend && pnpm run dev    # Vite :5173，代理 /api → :8790
 ```
 
+生产构建会从 `frontend/.env.production` 使用 `/whtasapp/` 作为静态资源基路径：
+
+```bash
+cd frontend && npm run build
+```
+
 ## 技术栈
 
 - **后端**: Go 1.26, Gin, pgx/v5, PostgreSQL, bcrypt, pg_trgm
