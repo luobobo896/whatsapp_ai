@@ -79,13 +79,15 @@ func TestQrSessionReportsBridgeFailureImmediately(t *testing.T) {
 	}
 }
 
-func TestEnsureOpenClawAccountConfigPreservesExistingSettings(t *testing.T) {
+func TestEnsureOpenClawAccountConfigEnablesTokenOnlyUnrestrictedAccess(t *testing.T) {
 	cfg := map[string]any{
+		"gateway": map[string]any{},
 		"channels": map[string]any{
 			"whatsapp": map[string]any{
 				"dmPolicy": "pairing",
 			},
 		},
+		"plugins": map[string]any{"allow": []string{"deepseek", "whatsapp"}},
 	}
 
 	if !ensureOpenClawAccountConfig(cfg, "wa_support") {
@@ -97,8 +99,25 @@ func TestEnsureOpenClawAccountConfigPreservesExistingSettings(t *testing.T) {
 
 	channels := cfg["channels"].(map[string]any)
 	whatsApp := channels["whatsapp"].(map[string]any)
-	if whatsApp["dmPolicy"] != "pairing" {
-		t.Fatalf("dm policy = %v, want pairing", whatsApp["dmPolicy"])
+	if whatsApp["dmPolicy"] != "open" {
+		t.Fatalf("dm policy = %v, want open", whatsApp["dmPolicy"])
+	}
+	allowFrom := whatsApp["allowFrom"].([]string)
+	if len(allowFrom) != 1 || allowFrom[0] != "*" {
+		t.Fatalf("allow from = %#v, want wildcard", allowFrom)
+	}
+	if cfg["gateway"].(map[string]any)["auth"].(map[string]any)["mode"] != "token" {
+		t.Fatalf("gateway auth = %#v, want token mode", cfg["gateway"])
+	}
+	if cfg["agents"].(map[string]any)["defaults"].(map[string]any)["sandbox"].(map[string]any)["mode"] != "off" {
+		t.Fatalf("agent defaults = %#v, want sandbox off", cfg["agents"])
+	}
+	tools := cfg["tools"].(map[string]any)
+	if tools["profile"] != "full" || tools["exec"].(map[string]any)["mode"] != "full" {
+		t.Fatalf("tools = %#v, want full access", tools)
+	}
+	if _, exists := cfg["plugins"].(map[string]any)["allow"]; exists {
+		t.Fatalf("plugin allowlist remains: %#v", cfg["plugins"])
 	}
 	accounts := whatsApp["accounts"].(map[string]any)
 	account, ok := accounts["wa_support"].(map[string]any)
@@ -150,6 +169,9 @@ func TestEnsureOpenClawRAGConfigCreatesIsolatedMCPAndRoutePerAccount(t *testing.
 	}
 	sales := servers[openClawRAGMCPName("wa_sales")].(map[string]any)
 	support := servers[openClawRAGMCPName("wa_support")].(map[string]any)
+	if _, exists := sales["toolFilter"]; exists {
+		t.Fatalf("MCP tool allowlist remains: %#v", sales)
+	}
 	if sales["env"].(map[string]any)["WHATSAPP_AI_ACCOUNT_ID"] != "account-sales" {
 		t.Fatalf("sales MCP account ID = %#v", sales["env"])
 	}
@@ -178,10 +200,11 @@ func TestEnsureOpenClawRAGConfigCreatesIsolatedMCPAndRoutePerAccount(t *testing.
 	}
 	for _, raw := range agents {
 		agent := raw.(map[string]any)
-		tools := agent["tools"].(map[string]any)
-		allow := tools["allow"].([]string)
-		if len(allow) != 1 || allow[0] != agent["id"].(string)+"__*" {
-			t.Fatalf("agent tool policy = %#v, want only its own MCP tools", tools)
+		if _, exists := agent["tools"]; exists {
+			t.Fatalf("agent tool restriction remains: %#v", agent)
+		}
+		if agent["sandbox"].(map[string]any)["mode"] != "off" {
+			t.Fatalf("agent sandbox = %#v, want off", agent["sandbox"])
 		}
 	}
 }
@@ -217,6 +240,16 @@ func TestRemoveOpenClawRAGConfigOnlyRemovesRequestedAccount(t *testing.T) {
 	}
 	if channels["whatsapp"].(map[string]any)["accounts"].(map[string]any)["wa_sales"].(map[string]any)["enabled"] != false {
 		t.Fatal("sales channel remains enabled")
+	}
+}
+
+func TestDisableOpenClawRAGAccountAtMissingPathIsAlreadyDisabled(t *testing.T) {
+	changed, err := disableOpenClawRAGAccountAtPath(filepath.Join(t.TempDir(), "missing.json"), "wa_support")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed {
+		t.Fatal("missing config was reported as changed")
 	}
 }
 
@@ -338,6 +371,31 @@ func TestOpenClawCommandSpecDefaultsToHostCLI(t *testing.T) {
 	want := []string{"channels", "status", "--json"}
 	if !slices.Equal(args, want) {
 		t.Fatalf("args = %#v, want %#v", args, want)
+	}
+}
+
+func TestValidateOpenClawRAGAgentModelAuthUsesAgentStatus(t *testing.T) {
+	dir := t.TempDir()
+	argsPath := filepath.Join(dir, "args")
+	script := "#!/bin/sh\n" +
+		"printf '%s' \"$*\" > " + argsPath + "\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "openclaw"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OPENCLAW_DOCKER_CONTAINER", "")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if err := validateOpenClawRAGAgentModelAuth("wa_support"); err != nil {
+		t.Fatal(err)
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "models status --agent whatsapp-rag-wa_support --check --plain"
+	if string(args) != want {
+		t.Fatalf("model auth command = %q, want %q", args, want)
 	}
 }
 
@@ -469,6 +527,85 @@ func TestApplyLiveAccountStatusesClearsStaleConnection(t *testing.T) {
 	}
 	if len(changed) != 1 || changed[0].ID != "account-1" {
 		t.Fatalf("changed accounts = %#v, want account-1", changed)
+	}
+}
+
+func TestReadAllWhatsAppStatusesCoalescesConcurrentRefreshes(t *testing.T) {
+	dir := t.TempDir()
+	countPath := filepath.Join(dir, "calls")
+	script := "#!/bin/sh\n" +
+		"echo call >> " + countPath + "\n" +
+		"sleep 0.1\n" +
+		"printf '%s\\n' '{\"channelAccounts\":{\"whatsapp\":[{\"accountId\":\"wa_support\",\"linked\":true,\"running\":true,\"connected\":true}]}}'\n"
+	if err := os.WriteFile(filepath.Join(dir, "openclaw"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OPENCLAW_DOCKER_CONTAINER", "")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	channelStatusCacheMu.Lock()
+	channelStatusCache = nil
+	channelStatusCacheAt = time.Time{}
+	channelStatusCacheMu.Unlock()
+
+	const callers = 12
+	var wg sync.WaitGroup
+	wg.Add(callers)
+	for range callers {
+		go func() {
+			defer wg.Done()
+			statuses := readAllWhatsAppChannelStatuses()
+			if !statuses["wa_support"].Connected {
+				t.Errorf("status = %#v, want connected", statuses)
+			}
+		}()
+	}
+	wg.Wait()
+
+	data, err := os.ReadFile(countPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls := len(strings.Fields(string(data))); calls != 1 {
+		t.Fatalf("OpenClaw status calls = %d, want 1", calls)
+	}
+}
+
+func TestReadAllWhatsAppStatusesCachesFailedRefreshes(t *testing.T) {
+	dir := t.TempDir()
+	countPath := filepath.Join(dir, "calls")
+	script := "#!/bin/sh\n" +
+		"echo call >> " + countPath + "\n" +
+		"sleep 0.1\n" +
+		"exit 1\n"
+	if err := os.WriteFile(filepath.Join(dir, "openclaw"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OPENCLAW_DOCKER_CONTAINER", "")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	channelStatusCacheMu.Lock()
+	channelStatusCache = nil
+	channelStatusCacheAt = time.Time{}
+	channelStatusCacheMu.Unlock()
+
+	const callers = 12
+	var wg sync.WaitGroup
+	wg.Add(callers)
+	for range callers {
+		go func() {
+			defer wg.Done()
+			if statuses := readAllWhatsAppChannelStatuses(); statuses != nil {
+				t.Errorf("statuses = %#v, want nil", statuses)
+			}
+		}()
+	}
+	wg.Wait()
+
+	data, err := os.ReadFile(countPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls := len(strings.Fields(string(data))); calls != 1 {
+		t.Fatalf("failed OpenClaw status calls = %d, want 1", calls)
 	}
 }
 

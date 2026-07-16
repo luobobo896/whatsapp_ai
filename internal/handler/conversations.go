@@ -19,7 +19,8 @@ var sendWhatsAppReply = sendOpenClawWhatsAppMessage
 
 func RegisterConversations(r *gin.RouterGroup, st *store.Store) {
 	RegisterConversationRead(r, st)
-	RegisterConversationManagement(r, st)
+	RegisterConversationReply(r, st)
+	RegisterConversationAdministration(r, st)
 }
 
 // RegisterConversationRead registers conversation history endpoints available
@@ -29,13 +30,16 @@ func RegisterConversationRead(r *gin.RouterGroup, st *store.Store) {
 	r.GET("/:id/messages", handleMessages(st))
 }
 
-// RegisterConversationManagement registers conversation mutations that require
-// the accounts:manage tenant permission.
-func RegisterConversationManagement(r *gin.RouterGroup, st *store.Store) {
+// RegisterConversationReply registers the mutations used to answer customers.
+func RegisterConversationReply(r *gin.RouterGroup, st *store.Store) {
 	r.POST("/query", handleConversationQuery(st))
 	r.POST("/messages", handleSaveMessage(st))
 	r.POST("/reply", handleSaveReply(st))
 	r.POST("/:id/send", handleSendConversationReply(st))
+}
+
+// RegisterConversationAdministration registers destructive conversation work.
+func RegisterConversationAdministration(r *gin.RouterGroup, st *store.Store) {
 	r.DELETE("/:id", handleDeleteConversation(st))
 }
 
@@ -65,25 +69,21 @@ func handleSendConversationReply(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusConflict, gin.H{"error": model.ErrorDetail{Code: "OPENCLAW_ERROR", Message: "WhatsApp account is not connected."}})
 			return
 		}
-		if err := st.CheckAssistantReplyCapacity(session.ActiveTenantID, account.ID); err != nil {
-			if errors.Is(err, store.ErrDailyReplyLimitReached) {
-				c.JSON(http.StatusTooManyRequests, gin.H{"error": model.ErrorDetail{Code: "DAILY_LIMIT_REACHED", Message: "Daily reply limit reached."}})
-				return
-			}
-			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to check reply capacity."}})
-			return
-		}
-		if err := sendWhatsAppReply(account.AccountKey, conversationID, req.Content); err != nil {
-			c.JSON(http.StatusBadGateway, gin.H{"error": model.ErrorDetail{Code: "OPENCLAW_ERROR", Message: err.Error()}})
-			return
-		}
-		message, err := st.SaveAssistantReply(session.ActiveTenantID, account.ID, conversationID, req.CustomerName, req.Content, "[]")
+		var deliveryErr error
+		message, err := st.DeliverAndSaveAssistantReply(session.ActiveTenantID, account.ID, conversationID, req.CustomerName, req.Content, "[]", func() error {
+			deliveryErr = sendWhatsAppReply(account.AccountKey, conversationID, req.Content)
+			return deliveryErr
+		})
 		if err != nil {
+			if deliveryErr != nil {
+				c.JSON(http.StatusBadGateway, gin.H{"error": model.ErrorDetail{Code: "OPENCLAW_ERROR", Message: deliveryErr.Error()}})
+				return
+			}
 			if errors.Is(err, store.ErrDailyReplyLimitReached) {
 				c.JSON(http.StatusTooManyRequests, gin.H{"error": model.ErrorDetail{Code: "DAILY_LIMIT_REACHED", Message: "Daily reply limit reached."}})
 				return
 			}
-			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Message was sent but could not be saved."}})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to send and save message."}})
 			return
 		}
 		c.JSON(http.StatusOK, message)
@@ -100,7 +100,7 @@ func RegisterInternalConversations(r *gin.RouterGroup, st *store.Store) {
 
 // resolveTenantFromAccount looks up the tenant that owns the given account.
 func resolveTenantFromAccount(st *store.Store, accountID string) (string, error) {
-	return st.TenantIDByAccountID(accountID)
+	return st.ActiveTenantIDByAccountID(accountID)
 }
 
 func accountKnowledgeBaseIDs(account *model.AccountRow) []string {

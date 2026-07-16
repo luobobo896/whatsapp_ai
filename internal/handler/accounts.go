@@ -48,6 +48,7 @@ const (
 	qrSessionCleanupWait   = time.Minute
 	openClawRestartWait    = 30 * time.Second
 	openClawCommandTimeout = 10 * time.Second
+	openClawModelCheckWait = 30 * time.Second
 	openClawRAGInstallWait = 2 * time.Minute
 	openClawPollInterval   = time.Second
 	channelStatusCacheTTL  = 5 * time.Second
@@ -242,7 +243,7 @@ func ensureOpenClawAccountAtPath(cfgPath, accountKey string) error {
 }
 
 func ensureOpenClawAccountConfig(cfg map[string]any, accountKey string) bool {
-	changed := false
+	changed := ensureOpenClawUnrestrictedAccessConfig(cfg)
 	channels, _ := cfg["channels"].(map[string]any)
 	if channels == nil {
 		channels = map[string]any{}
@@ -272,6 +273,85 @@ func ensureOpenClawAccountConfig(cfg map[string]any, accountKey string) bool {
 	return changed
 }
 
+func ensureOpenClawUnrestrictedAccessConfig(cfg map[string]any) bool {
+	changed := false
+	channels := ensureConfigMap(cfg, "channels")
+	whatsapp := ensureConfigMap(channels, "whatsapp")
+	if whatsapp["dmPolicy"] != "open" {
+		whatsapp["dmPolicy"] = "open"
+		changed = true
+	}
+	if !isWildcardAllowFrom(whatsapp["allowFrom"]) {
+		whatsapp["allowFrom"] = []string{"*"}
+		changed = true
+	}
+
+	gateway := ensureConfigMap(cfg, "gateway")
+	auth := ensureConfigMap(gateway, "auth")
+	if auth["mode"] != "token" {
+		auth["mode"] = "token"
+		changed = true
+	}
+
+	agents := ensureConfigMap(cfg, "agents")
+	defaults := ensureConfigMap(agents, "defaults")
+	sandbox := ensureConfigMap(defaults, "sandbox")
+	if sandbox["mode"] != "off" {
+		sandbox["mode"] = "off"
+		changed = true
+	}
+
+	tools := ensureConfigMap(cfg, "tools")
+	if tools["profile"] != "full" {
+		tools["profile"] = "full"
+		changed = true
+	}
+	execPolicy := ensureConfigMap(tools, "exec")
+	if execPolicy["mode"] != "full" {
+		execPolicy["mode"] = "full"
+		changed = true
+	}
+	for _, key := range []string{"security", "ask"} {
+		if _, exists := execPolicy[key]; exists {
+			delete(execPolicy, key)
+			changed = true
+		}
+	}
+	for _, key := range []string{"allow", "deny", "byProvider", "sandbox", "subagents"} {
+		if _, exists := tools[key]; exists {
+			delete(tools, key)
+			changed = true
+		}
+	}
+	if plugins, ok := cfg["plugins"].(map[string]any); ok {
+		if _, exists := plugins["allow"]; exists {
+			delete(plugins, "allow")
+			changed = true
+		}
+	}
+	return changed
+}
+
+func ensureConfigMap(parent map[string]any, key string) map[string]any {
+	value, _ := parent[key].(map[string]any)
+	if value == nil {
+		value = map[string]any{}
+		parent[key] = value
+	}
+	return value
+}
+
+func isWildcardAllowFrom(value any) bool {
+	switch values := value.(type) {
+	case []string:
+		return len(values) == 1 && values[0] == "*"
+	case []any:
+		return len(values) == 1 && values[0] == "*"
+	default:
+		return false
+	}
+}
+
 type openClawRAGOptions struct {
 	APIURL    string
 	APIToken  string
@@ -294,6 +374,7 @@ func ensureOpenClawRAGConfig(cfg map[string]any, accountID, accountKey string, o
 	if options.APIURL == "" || options.APIToken == "" || options.MCPPath == "" || options.Workspace == "" {
 		return errors.New("OpenClaw RAG 配置不完整")
 	}
+	ensureOpenClawUnrestrictedAccessConfig(cfg)
 
 	mcp, _ := cfg["mcp"].(map[string]any)
 	if mcp == nil {
@@ -315,7 +396,6 @@ func ensureOpenClawRAGConfig(cfg map[string]any, accountID, accountKey string, o
 			"INTERNAL_API_TOKEN":     options.APIToken,
 			"WHATSAPP_AI_ACCOUNT_ID": accountID,
 		},
-		"toolFilter": map[string]any{"include": []string{"search_knowledge", "save_reply"}},
 	}
 
 	agents, _ := cfg["agents"].(map[string]any)
@@ -329,10 +409,7 @@ func ensureOpenClawRAGConfig(cfg map[string]any, accountID, accountKey string, o
 		"id":          agentID,
 		"workspace":   filepath.Join(options.Workspace, agentID),
 		"description": "WhatsApp knowledge-base customer service agent",
-		"tools": map[string]any{
-			"profile": "minimal",
-			"allow":   []string{mcpName + "__*"},
-		},
+		"sandbox":     map[string]any{"mode": "off"},
 	}
 	foundAgent := false
 	for i, raw := range agentList {
@@ -691,13 +768,31 @@ func ensureOpenClawRAGAccount(accountID, accountKey string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if sameOpenClawConfig(data, updated) {
-		return tokenChanged, nil
+	changed := tokenChanged
+	if !sameOpenClawConfig(data, updated) {
+		if err := os.WriteFile(cfgPath, updated, 0o600); err != nil {
+			return false, err
+		}
+		changed = true
 	}
-	if err := os.WriteFile(cfgPath, updated, 0o600); err != nil {
+	if err := validateOpenClawRAGAgentModelAuth(accountKey); err != nil {
 		return false, err
 	}
-	return true, nil
+	return changed, nil
+}
+
+func validateOpenClawRAGAgentModelAuth(accountKey string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), openClawModelCheckWait)
+	defer cancel()
+	output, err := openClawCommand(ctx, "models", "status", "--agent", openClawRAGAgentID(accountKey), "--check", "--plain").CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	message := strings.TrimSpace(string(output))
+	if message == "" {
+		message = err.Error()
+	}
+	return fmt.Errorf("OpenClaw Agent %s 模型认证不可用: %s", openClawRAGAgentID(accountKey), message)
 }
 
 func disableOpenClawRAGAccount(accountKey string) (bool, error) {
@@ -707,7 +802,14 @@ func disableOpenClawRAGAccount(accountKey string) (bool, error) {
 	}
 	openClawConfigMu.Lock()
 	defer openClawConfigMu.Unlock()
+	return disableOpenClawRAGAccountAtPath(cfgPath, accountKey)
+}
+
+func disableOpenClawRAGAccountAtPath(cfgPath, accountKey string) (bool, error) {
 	data, err := os.ReadFile(cfgPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
 	if err != nil {
 		return false, err
 	}
@@ -742,12 +844,52 @@ func SyncOpenClawRAGAccounts(st *store.Store) error {
 	changed := false
 	var syncErrors []error
 	for _, account := range accounts {
-		if account.Status == "disabled" {
+		tenant, err := st.TenantByID(account.TenantID)
+		if err != nil {
+			syncErrors = append(syncErrors, fmt.Errorf("读取客服 %s 的租户状态: %w", account.ID, err))
 			continue
 		}
-		accountChanged, err := ensureOpenClawRAGAccount(account.ID, account.AccountKey)
+		var accountChanged bool
+		if account.Status == "disabled" || tenant.Status != "active" {
+			accountChanged, err = disableOpenClawRAGAccount(account.AccountKey)
+		} else {
+			accountChanged, err = ensureOpenClawRAGAccount(account.ID, account.AccountKey)
+		}
 		if err != nil {
-			syncErrors = append(syncErrors, fmt.Errorf("配置客服 %s 的知识库路由: %w", account.ID, err))
+			syncErrors = append(syncErrors, fmt.Errorf("同步客服 %s 的知识库路由: %w", account.ID, err))
+			continue
+		}
+		changed = changed || accountChanged
+	}
+	if changed {
+		if err := restartOpenClawGatewaySafely(); err != nil {
+			syncErrors = append(syncErrors, err)
+		}
+	}
+	return errors.Join(syncErrors...)
+}
+
+// ReconcileTenantOpenClawRAG applies tenant suspension/reactivation to every
+// account route in one gateway restart.
+func ReconcileTenantOpenClawRAG(st *store.Store, tenantID, tenantStatus string) error {
+	if !isOpenClawAvailable() {
+		return nil
+	}
+	accounts, err := st.AccountsByTenant(tenantID)
+	if err != nil {
+		return err
+	}
+	changed := false
+	var syncErrors []error
+	for _, account := range accounts {
+		var accountChanged bool
+		if tenantStatus != "active" || account.Status == "disabled" {
+			accountChanged, err = disableOpenClawRAGAccount(account.AccountKey)
+		} else {
+			accountChanged, err = ensureOpenClawRAGAccount(account.ID, account.AccountKey)
+		}
+		if err != nil {
+			syncErrors = append(syncErrors, fmt.Errorf("同步客服 %s 的知识库路由: %w", account.ID, err))
 			continue
 		}
 		changed = changed || accountChanged
@@ -784,23 +926,21 @@ func readWhatsAppChannelStatus(accountKey string) channelConnectionStatus {
 
 func readAllWhatsAppChannelStatuses() map[string]channelConnectionStatus {
 	channelStatusCacheMu.Lock()
-	if time.Since(channelStatusCacheAt) < channelStatusCacheTTL && channelStatusCache != nil {
-		cached := channelStatusCache
-		channelStatusCacheMu.Unlock()
-		return cached
+	defer channelStatusCacheMu.Unlock()
+	if !channelStatusCacheAt.IsZero() && time.Since(channelStatusCacheAt) < channelStatusCacheTTL {
+		return channelStatusCache
 	}
-	channelStatusCacheMu.Unlock()
 
 	out, err := openClawOutput(openClawCommandTimeout, "channels", "status", "--channel", "whatsapp", "--json")
 	if err != nil {
+		channelStatusCache = nil
+		channelStatusCacheAt = time.Now()
 		return nil
 	}
 	statuses := parseAllWhatsAppChannelStatuses(out)
 
-	channelStatusCacheMu.Lock()
 	channelStatusCache = statuses
 	channelStatusCacheAt = time.Now()
-	channelStatusCacheMu.Unlock()
 
 	return statuses
 }

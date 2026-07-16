@@ -33,34 +33,13 @@ func dailyReplyLimitReached(limit, count int) bool {
 	return limit > 0 && count >= limit
 }
 
-// CheckAssistantReplyCapacity rejects a send before it reaches the external
-// WhatsApp gateway when the account has exhausted its daily reply allowance.
-func (s *Store) CheckAssistantReplyCapacity(tenantID, accountID string) error {
-	var dailyLimit, repliesToday int
-	if err := s.pool.QueryRow(context.Background(),
-		`SELECT a.daily_limit, COUNT(m.id)
-		 FROM accounts a
-		 LEFT JOIN conversation_messages m ON m.tenant_id=a.tenant_id
-		  AND m.account_id=a.id AND m.role='assistant'
-		  AND m.created_at >= date_trunc('day', CURRENT_TIMESTAMP)
-		 WHERE a.id=$1 AND a.tenant_id=$2
-		 GROUP BY a.daily_limit`,
-		accountID, tenantID,
-	).Scan(&dailyLimit, &repliesToday); err != nil {
-		return err
-	}
-	if dailyReplyLimitReached(dailyLimit, repliesToday) {
-		return ErrDailyReplyLimitReached
-	}
-	return nil
-}
-
 func Open(ctx context.Context, dsn string) (*Store, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("parse dsn: %w", err)
 	}
 	cfg.MaxConns = 20
+	cfg.ConnConfig.RuntimeParams["timezone"] = "Asia/Shanghai"
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("connect pg: %w", err)
@@ -657,6 +636,19 @@ func (s *Store) TenantIDByAccountID(accountID string) (string, error) {
 	return tenantID, err
 }
 
+// ActiveTenantIDByAccountID resolves an account only while both its tenant and
+// the account itself are enabled for service-to-service traffic.
+func (s *Store) ActiveTenantIDByAccountID(accountID string) (string, error) {
+	var tenantID string
+	err := s.pool.QueryRow(context.Background(), `
+		SELECT a.tenant_id
+		FROM accounts a
+		JOIN tenants t ON t.id=a.tenant_id
+		WHERE a.id=$1 AND a.status <> 'disabled' AND t.status='active'`, accountID,
+	).Scan(&tenantID)
+	return tenantID, err
+}
+
 func (s *Store) UpdateAccount(tenantID, accountID, name, status string, kbID *string, dailyLimit, replyLimit *int) (*model.AccountRow, error) {
 	q := `UPDATE accounts SET `
 	args := []any{}
@@ -993,9 +985,19 @@ func (s *Store) SaveMessage(tenantID, accountID, conversationID, customerName, r
 	return m, nil
 }
 
-// SaveAssistantReply saves a reply only if the account has remaining daily capacity.
-// The account row lock serializes concurrent reply attempts for the same account.
 func (s *Store) SaveAssistantReply(tenantID, accountID, conversationID, customerName, content, knowledgeIDs string) (*model.ConversationMessage, error) {
+	return s.saveAssistantReply(tenantID, accountID, conversationID, customerName, content, knowledgeIDs, nil)
+}
+
+// DeliverAndSaveAssistantReply holds the account quota lock while delivering
+// an external reply, then records that reply in the same transaction.
+func (s *Store) DeliverAndSaveAssistantReply(tenantID, accountID, conversationID, customerName, content, knowledgeIDs string, deliver func() error) (*model.ConversationMessage, error) {
+	return s.saveAssistantReply(tenantID, accountID, conversationID, customerName, content, knowledgeIDs, deliver)
+}
+
+// saveAssistantReply saves a reply only if the account has remaining daily
+// capacity. The account row lock serializes attempts for the same account.
+func (s *Store) saveAssistantReply(tenantID, accountID, conversationID, customerName, content, knowledgeIDs string, deliver func() error) (*model.ConversationMessage, error) {
 	ctx := context.Background()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1017,6 +1019,11 @@ func (s *Store) SaveAssistantReply(tenantID, accountID, conversationID, customer
 		}
 		if dailyReplyLimitReached(dailyLimit, repliesToday) {
 			return nil, ErrDailyReplyLimitReached
+		}
+	}
+	if deliver != nil {
+		if err := deliver(); err != nil {
+			return nil, err
 		}
 	}
 

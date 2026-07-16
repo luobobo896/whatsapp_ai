@@ -19,6 +19,7 @@ import (
 
 	"whatsapp-ai-poc/internal/handler"
 	"whatsapp-ai-poc/internal/middleware"
+	"whatsapp-ai-poc/internal/model"
 	"whatsapp-ai-poc/internal/store"
 	"whatsapp-ai-poc/web"
 )
@@ -91,8 +92,8 @@ func run() error {
 		handler.RegisterKnowledgeSearch(api.Group("/knowledge", middleware.RequireActiveTenant()), st)
 		conversations := api.Group("/conversations", middleware.RequireActiveTenant())
 		handler.RegisterConversationRead(conversations, st)
-		conversations.Use(middleware.RequireTenantPermission("accounts:manage"))
-		handler.RegisterConversationManagement(conversations, st)
+		handler.RegisterConversationReply(conversations.Group("", middleware.RequireTenantPermission("conversations:reply")), st)
+		handler.RegisterConversationAdministration(conversations.Group("", middleware.RequireTenantPermission("accounts:manage")), st)
 
 		members := api.Group("/members", middleware.RequireActiveTenant())
 		members.GET("", handler.ListMembers(st))
@@ -112,9 +113,7 @@ func run() error {
 
 	// SPA fallback
 	frontend := web.Handler()
-	router.NoRoute(func(c *gin.Context) {
-		frontend.ServeHTTP(c.Writer, c.Request)
-	})
+	router.NoRoute(apiAwareFallback(frontend))
 
 	addr := net.JoinHostPort(host, port)
 	listener, err := net.Listen("tcp", addr)
@@ -146,6 +145,16 @@ func run() error {
 		return err
 	}
 	return nil
+}
+
+func apiAwareFallback(frontend http.Handler) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.Request.URL.Path == "/api" || strings.HasPrefix(c.Request.URL.Path, "/api/") {
+			c.JSON(http.StatusNotFound, gin.H{"error": model.ErrorDetail{Code: "NOT_FOUND", Message: "API endpoint not found."}})
+			return
+		}
+		frontend.ServeHTTP(c.Writer, c.Request)
+	}
 }
 
 func seedPlatformAdmin(st *store.Store) error {

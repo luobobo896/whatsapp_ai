@@ -33,6 +33,8 @@ const loadingMsgs = ref(false);
 const replyText = ref("");
 const sending = ref(false);
 const chatBody = ref(null);
+const searchInput = ref(null);
+const inspector = ref(null);
 let pollTimer = null;
 let messageRequestVersion = 0;
 let polling = false;
@@ -68,7 +70,7 @@ const dailyProgress = computed(() => {
   return Math.min(100, Math.round(((props.account.dailyReplies || 0) / props.account.dailyLimit) * 100));
 });
 const hasSendableTarget = computed(() => /^\+\d{7,15}$/.test(selectedConv.value?.conversationId || ""));
-const canSend = computed(() => Boolean(selectedConv.value && hasSendableTarget.value && replyText.value.trim()));
+const canSend = computed(() => Boolean(!sending.value && selectedConv.value && hasSendableTarget.value && replyText.value.trim()));
 const recipientHint = computed(() =>
   hasSendableTarget.value ? "消息将通过当前 WhatsApp 账号发送" : "该会话没有可投递的 E.164 手机号，暂不可直接发送",
 );
@@ -128,9 +130,17 @@ function scrollToBottom() {
   if (chatBody.value) chatBody.value.scrollTop = chatBody.value.scrollHeight;
 }
 
+function focusConversationSearch() {
+  searchInput.value?.focus?.();
+}
+
+function showConversationInfo() {
+  inspector.value?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+}
+
 async function sendReply() {
-  const text = replyText.value.trim();
-  if (!text || !selectedConv.value || !hasSendableTarget.value) return;
+	const text = replyText.value.trim();
+	if (sending.value || !text || !selectedConv.value || !hasSendableTarget.value) return;
   sending.value = true;
   try {
     await post(
@@ -197,10 +207,10 @@ loadConversations();
             <p>{{ conversations.length }} 个会话</p>
           </div>
         </div>
-        <el-button class="chat-icon-button" text :icon="SlidersHorizontal" aria-label="会话筛选" title="会话筛选" />
+        <el-button class="chat-icon-button" text :icon="SlidersHorizontal" aria-label="会话筛选" title="会话筛选" @click="focusConversationSearch" />
       </header>
       <div class="chat-search-box">
-        <el-input v-model="searchText" clearable placeholder="搜索会话">
+        <el-input ref="searchInput" v-model="searchText" clearable placeholder="搜索会话">
           <template #prefix><Search :size="16" /></template>
         </el-input>
       </div>
@@ -245,7 +255,7 @@ loadConversations();
         </div>
         <div class="chat-main-actions">
           <span class="chat-message-count">{{ selectedConv.messageCount || messages.length }} 条消息</span>
-          <el-button class="chat-icon-button" text :icon="Info" aria-label="查看会话信息" title="查看会话信息" />
+          <el-button class="chat-icon-button" text :icon="Info" aria-label="查看会话信息" title="查看会话信息" @click="showConversationInfo" />
         </div>
       </header>
       <div v-else class="chat-main-header is-empty">
@@ -299,7 +309,7 @@ loadConversations();
       </footer>
     </main>
 
-    <aside class="chat-inspector">
+    <aside ref="inspector" class="chat-inspector">
       <div class="chat-inspector-header"><h3>会话上下文</h3><Info :size="16" /></div>
       <section class="chat-inspector-section">
         <div class="chat-inspector-section-title"><span>客服账号</span><span class="chat-status" :class="`is-${accountStatus.tone}`"><Circle :size="8" fill="currentColor" /> {{ accountStatus.label }}</span></div>

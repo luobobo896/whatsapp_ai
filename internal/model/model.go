@@ -114,9 +114,9 @@ type TenantWithMembership struct {
 func PermissionsForRole(role string) []string {
 	switch role {
 	case "owner", "admin":
-		return []string{"accounts:manage", "knowledge:manage", "members:manage"}
+		return []string{"accounts:manage", "knowledge:manage", "members:manage", "conversations:reply"}
 	case "agent":
-		return []string{"accounts:manage", "knowledge:manage"}
+		return []string{"conversations:reply"}
 	default:
 		return nil
 	}

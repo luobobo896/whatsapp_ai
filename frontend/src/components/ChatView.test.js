@@ -105,4 +105,32 @@ describe("ChatView", () => {
     );
     wrapper.unmount();
   });
+
+  it("does not submit a second reply while the first send is pending", async () => {
+    mocks.get.mockImplementation((path) => {
+      if (path.startsWith("/api/conversations?")) {
+        return Promise.resolve({ conversations: [{
+          conversationId: "+8613800000000",
+          customerName: "客户一号",
+          lastMessage: "需要帮助",
+          messageCount: 1,
+        }] });
+      }
+      return Promise.resolve({ messages: [] });
+    });
+    let finishSend;
+    mocks.post.mockImplementation(() => new Promise((resolve) => { finishSend = resolve; }));
+
+    const wrapper = mountChat("+8613800000000");
+    await flushPromises();
+    const composer = wrapper.find(".chat-composer-input");
+    await composer.setValue("只发送一次");
+    await composer.trigger("keydown", { key: "Enter" });
+    await composer.trigger("keydown", { key: "Enter" });
+
+    expect(mocks.post).toHaveBeenCalledTimes(1);
+    finishSend({ id: "message-1" });
+    await flushPromises();
+    wrapper.unmount();
+  });
 });

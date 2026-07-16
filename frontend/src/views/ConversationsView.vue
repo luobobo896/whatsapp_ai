@@ -81,6 +81,8 @@ async function deleteConversation(conv) {
                 :icon="Trash2"
                 circle
                 size="small"
+                aria-label="删除会话"
+                title="删除会话"
                 :loading="deletingConv === row.conversationId"
                 @click.stop
               />

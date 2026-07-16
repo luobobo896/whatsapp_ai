@@ -100,10 +100,10 @@ func handleCreateTenant(st *store.Store) gin.HandlerFunc {
 
 		resp := model.CreateTenantResponse{
 			Tenant: model.TenantWithMembership{
-				ID:     tenant.ID,
-				Name:   tenant.Name,
-				Status: tenant.Status,
-				Role:   "owner",
+				ID:          tenant.ID,
+				Name:        tenant.Name,
+				Status:      tenant.Status,
+				Role:        "owner",
 				Permissions: model.PermissionsForRole("owner"),
 			},
 		}
@@ -132,6 +132,10 @@ func handleUpdateTenantStatus(st *store.Store) gin.HandlerFunc {
 		}
 		if err := st.UpdateTenantStatus(tenantID, req.Status); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to update tenant."}})
+			return
+		}
+		if err := ReconcileTenantOpenClawRAG(st, tenantID, req.Status); err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": model.ErrorDetail{Code: "OPENCLAW_ERROR", Message: err.Error()}})
 			return
 		}
 		c.Status(http.StatusNoContent)

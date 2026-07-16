@@ -23,6 +23,25 @@ import {
 const API_URL = process.env.WHATSAPP_AI_API_URL || "http://127.0.0.1:8790";
 const API_TOKEN = process.env.INTERNAL_API_TOKEN || "";
 const ACCOUNT_ID = process.env.WHATSAPP_AI_ACCOUNT_ID || "";
+const knowledgeByConversation = new Map();
+const KNOWLEDGE_CONTEXT_TTL_MS = 5 * 60 * 1000;
+
+function rememberKnowledge(conversationId, ids) {
+  const entry = { ids: JSON.stringify(ids), expiresAt: Date.now() + KNOWLEDGE_CONTEXT_TTL_MS };
+  knowledgeByConversation.set(conversationId, entry);
+  const timer = setTimeout(() => {
+    if (knowledgeByConversation.get(conversationId) === entry) {
+      knowledgeByConversation.delete(conversationId);
+    }
+  }, KNOWLEDGE_CONTEXT_TTL_MS);
+  timer.unref?.();
+}
+
+function takeKnowledge(conversationId) {
+  const entry = knowledgeByConversation.get(conversationId);
+  knowledgeByConversation.delete(conversationId);
+  return entry && entry.expiresAt > Date.now() ? entry.ids : "[]";
+}
 
 if (!API_TOKEN) {
   console.error("[rag-mcp] INTERNAL_API_TOKEN is not set – exiting.");
@@ -123,6 +142,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         accountId: ACCOUNT_ID,
         customerName: customerName || conversationId,
         content,
+        knowledgeIds: takeKnowledge(conversationId),
       });
       return { content: [{ type: "text", text: "回复已保存。" }] };
     } catch (err) {
@@ -148,6 +168,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       maxHistory: 10,
       maxKnowledge: 5,
     });
+
+    rememberKnowledge(
+      conversationId,
+		(data.knowledge || []).map((item) => item.id).filter(Boolean),
+    );
 
     // If the backend returns a direct (fallback) reply, the agent should
     // send it verbatim instead of calling the LLM.
@@ -182,21 +207,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (data.history && data.history.length > 0) {
       historyText = "## 对话历史\n\n";
       for (const msg of data.history) {
-        const role = msg.role === "user" ? "用户" : "客服";
+        const role = msg.role === "user" || msg.role === "customer" ? "用户" : "客服";
         historyText += `**${role}**: ${msg.content}\n\n`;
       }
     }
+
+    const latestHistory = data.history?.at(-1);
+    const historyContainsLatest =
+      (latestHistory?.role === "user" || latestHistory?.role === "customer") &&
+      latestHistory?.content === query;
 
     const result = [
       personaPrompt,
       knowledgeText,
       historyText,
-      `\n用户最新消息: ${query}`,
+      historyContainsLatest ? "" : `\n用户最新消息: ${query}`,
       `\n[重要] 回复后必须调用 save_reply 保存。`,
     ].join("\n");
 
     return { content: [{ type: "text", text: result }] };
   } catch (err) {
+    knowledgeByConversation.delete(conversationId);
     return {
       content: [
         {

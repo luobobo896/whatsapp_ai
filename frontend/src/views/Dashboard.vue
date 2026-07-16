@@ -90,6 +90,10 @@ const isPlatformAdmin = computed(() => !!platformRole.value);
 const selectedKnowledgeBase = computed(() =>
   knowledgeBases.value.find((b) => b.id === knowledgeBaseId.value) || null,
 );
+const currentViewTitle = computed(() => {
+  if (view.value === "chat") return chatAccount.value ? `${chatAccount.value.name}会话` : "客服会话";
+  return NAV_ITEMS.find((item) => item.id === view.value)?.label || "工作台";
+});
 
 function navigateToKnowledgeDetail(base) {
   knowledgeBaseId.value = base.id;
@@ -243,7 +247,7 @@ function navigate(v) {
               <span style="color:#6b736d;margin:0 6px">/</span>
               {{ selectedKnowledgeBase?.name || '' }}
             </template>
-            <template v-else>{{ NAV_ITEMS.find((i) => i.id === view)?.label }}</template>
+            <template v-else>{{ currentViewTitle }}</template>
           </h2>
           <p>
             {{ activeTenant ? activeTenant.name : isPlatformAdmin ? "平台管理空间" : "尚未选择租户工作区" }}
@@ -262,7 +266,7 @@ function navigate(v) {
             <el-option value="" disabled label="选择工作区" />
             <el-option v-for="t in selectableTenants" :key="t.id" :value="t.id" :label="t.name" />
           </el-select>
-          <el-button :icon="RefreshCw" circle @click="refresh" />
+          <el-button :icon="RefreshCw" circle aria-label="刷新工作台" title="刷新工作台" @click="refresh" />
           <span class="user-chip">
             <span class="user-chip-avatar">{{ (session?.user.displayName || session?.user.email || "").slice(0, 1).toUpperCase() }}</span>
             <span class="user-chip-name">{{ session?.user.displayName || session?.user.email }}</span>
