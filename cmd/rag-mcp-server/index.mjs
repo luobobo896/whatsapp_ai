@@ -67,12 +67,37 @@ async function apiPost(path, body) {
       Authorization: `Bearer ${API_TOKEN}`,
     },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(15000),
   });
   if (!resp.ok) {
     const text = await resp.text();
-    throw new Error(`API ${path} returned ${resp.status}: ${text}`);
+    const err = new Error(`API ${path} returned ${resp.status}: ${text}`);
+    err.status = resp.status;
+    throw err;
   }
   return resp.json();
+}
+
+// apiPostRetryable retries on network failures (fetch throw / abort) and 5xx
+// responses with exponential backoff. 4xx responses are thrown immediately —
+// the server has deliberately rejected the request and a retry will not help.
+// Used only for save_reply, where persistence is worth a short retry budget.
+async function apiPostRetryable(path, body, retries = 2) {
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await apiPost(path, body);
+    } catch (err) {
+      lastErr = err;
+      const transient = err.status === undefined || (err.status >= 500 && err.status < 600);
+      if (!transient || attempt === retries) {
+        throw err;
+      }
+      const backoffMs = 500 * 2 ** attempt;
+      await new Promise((r) => setTimeout(r, backoffMs));
+    }
+  }
+  throw lastErr;
 }
 
 // ---- MCP server --------------------------------------------------------
@@ -154,7 +179,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 			};
 		}
 		try {
-      await apiPost("/api/internal/conversations/reply", {
+      await apiPostRetryable("/api/internal/conversations/reply", {
         conversationId,
         accountId: ACCOUNT_ID,
         customerName: customerName || conversationId,
@@ -193,8 +218,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       maxKnowledge: 5,
     });
 
-		if (!data.retrievalToken) {
-		}
 		rememberKnowledge(
 			conversationId,
 			(data.knowledge || []).map((item) => item.id).filter(Boolean),

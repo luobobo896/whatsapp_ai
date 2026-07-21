@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -349,7 +350,24 @@ func handleDeleteBase(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "TENANT_REQUIRED", Message: "No tenant selected."}})
 			return
 		}
-		if err := st.DeleteKnowledgeBase(c.Param("id"), session.ActiveTenantID); err != nil {
+		knowledgeBaseID := c.Param("id")
+		// Load the base BEFORE deleting so the audit entry records the human-
+		// readable name as well as the ID. After deletion the row is gone and
+		// only the ID would remain in the logs.
+		base, err := st.KnowledgeBaseByID(knowledgeBaseID, session.ActiveTenantID)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": model.ErrorDetail{Code: "NOT_FOUND", Message: "Knowledge base not found."}})
+			return
+		}
+		if err := st.DeleteKnowledgeBase(knowledgeBaseID, session.ActiveTenantID); err != nil {
+			slog.Info("audit knowledge base delete",
+				"subject", session.User.ID,
+				"action", "knowledge_base.delete",
+				"target", knowledgeBaseID,
+				"tenant", session.ActiveTenantID,
+				"name", base.Name,
+				"result", "failure: "+err.Error(),
+			)
 			if errors.Is(err, pgx.ErrNoRows) {
 				c.JSON(http.StatusNotFound, gin.H{"error": model.ErrorDetail{Code: "NOT_FOUND", Message: "Knowledge base not found."}})
 			} else {
@@ -357,6 +375,14 @@ func handleDeleteBase(st *store.Store) gin.HandlerFunc {
 			}
 			return
 		}
+		slog.Info("audit knowledge base delete",
+			"subject", session.User.ID,
+			"action", "knowledge_base.delete",
+			"target", knowledgeBaseID,
+			"tenant", session.ActiveTenantID,
+			"name", base.Name,
+			"result", "success",
+		)
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	}
 }

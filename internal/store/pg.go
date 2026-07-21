@@ -30,8 +30,9 @@ type ChunkInfo struct {
 }
 
 type Store struct {
-	pool  *pgxpool.Pool
-	embed *embedding.Client
+	pool     *pgxpool.Pool
+	embed    *embedding.Client
+	stopChan chan struct{}
 }
 
 var ErrDailyReplyLimitReached = errors.New("daily reply limit reached")
@@ -55,15 +56,21 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 		pool.Close()
 		return nil, fmt.Errorf("ping pg: %w", err)
 	}
-	s := &Store{pool: pool, embed: embedding.NewFromEnv()}
+	s := &Store{pool: pool, embed: embedding.NewFromEnv(), stopChan: make(chan struct{})}
 	if err := s.migrate(ctx); err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+	s.startBackfillWorker()
 	return s, nil
 }
 
-func (s *Store) Close() { s.pool.Close() }
+func (s *Store) Close() {
+	if s.stopChan != nil {
+		close(s.stopChan)
+	}
+	s.pool.Close()
+}
 
 func genID() string    { b := make([]byte, 12); rand.Read(b); return hex.EncodeToString(b) }
 func genToken() string { b := make([]byte, 32); rand.Read(b); return hex.EncodeToString(b) }
@@ -152,6 +159,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	migrations := []string{
 		`CREATE EXTENSION IF NOT EXISTS pg_trgm`,
+		`CREATE EXTENSION IF NOT EXISTS vector`,
+		fmt.Sprintf(`ALTER TABLE knowledge_chunks ADD COLUMN IF NOT EXISTS vec vector(%d)`, embeddingVectorDim),
+		`CREATE INDEX IF NOT EXISTS idx_chunks_vec ON knowledge_chunks USING hnsw (vec vector_cosine_ops) WHERE vec IS NOT NULL`,
 		`ALTER TABLE knowledge_articles ADD COLUMN IF NOT EXISTS attributes TEXT NOT NULL DEFAULT '{}'`,
 		`CREATE INDEX IF NOT EXISTS idx_articles_title_trgm ON knowledge_articles USING GIN (title gin_trgm_ops)`,
 		`CREATE INDEX IF NOT EXISTS idx_articles_content_trgm ON knowledge_articles USING GIN (content gin_trgm_ops)`,
@@ -687,6 +697,11 @@ func (s *Store) UpdateAccount(tenantID, accountID, name, status string, kbID *st
 		args = append(args, *replyLimit)
 		idx++
 	}
+	if len(args) == 0 {
+		// Otherwise the trimming of the trailing ", " yields "UPDATE accounts
+		// WHERE ..." which is a syntax error surfaced only at runtime.
+		return nil, errors.New("UpdateAccount: nothing to update")
+	}
 	q = q[:len(q)-2] + fmt.Sprintf(` WHERE id=$%d AND tenant_id=$%d RETURNING id,tenant_id,name,account_key,status,daily_limit,kb_id,reply_limit,to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')`, idx, idx+1)
 	args = append(args, accountID, tenantID)
 	a := &model.AccountRow{}
@@ -895,6 +910,12 @@ func (s *Store) searchKnowledge(tenantID string, baseIDs []string, query string,
 // article cannot hold a long-open transaction with thousands of chunk INSERTs.
 const maxArticleRunes = 50000
 
+// embeddingVectorDim is the dimensionality of the vectors stored in
+// knowledge_chunks.vec and produced by embedding.Client (bge-base-zh).
+// It must match both the column DDL and the embedder's output length, otherwise
+// pgvector casts and the HNSW index silently break retrieval.
+const embeddingVectorDim = 768
+
 func chunkArticleTx(ctx context.Context, tx pgx.Tx, articleID, content string) error {
 	// Bound per-article work; callers that need full indexing for larger docs
 	// should split the input themselves.
@@ -905,22 +926,37 @@ func chunkArticleTx(ctx context.Context, tx pgx.Tx, articleID, content string) e
 	// Preserve embeddings of unchanged chunks (keyed by exact content) so that
 	// editing title/category (or minor content tweaks) does not zero out the
 	// article's vector index and silently take it out of retrieval until the
-	// background embedder catches up.
+	// background embedder catches up. Both the JSON text column and the
+	// pgvector vec column are preserved: the previous version cached only
+	// `embedding`, so the DELETE+INSERT cycle silently NULLed `vec`, and since
+	// embedPendingChunks filtered on `embedding IS NULL` the cached chunks were
+	// never re-vectorized — edited articles fell out of ANN retrieval forever.
 	existingRows, err := tx.Query(ctx,
-		"SELECT content, embedding FROM knowledge_chunks WHERE article_id=$1", articleID)
+		"SELECT content, embedding, vec::text FROM knowledge_chunks WHERE article_id=$1", articleID)
 	if err != nil {
 		return err
 	}
-	preservedEmbeddings := map[string]string{}
+	type preserved struct {
+		embedding string
+		vec       string
+	}
+	preservedChunks := map[string]preserved{}
 	for existingRows.Next() {
 		var c string
-		var emb *string
-		if err := existingRows.Scan(&c, &emb); err != nil {
+		var emb, vec *string
+		if err := existingRows.Scan(&c, &emb, &vec); err != nil {
 			existingRows.Close()
 			return err
 		}
+		p := preserved{}
 		if emb != nil && *emb != "" {
-			preservedEmbeddings[c] = *emb
+			p.embedding = *emb
+		}
+		if vec != nil && *vec != "" {
+			p.vec = *vec
+		}
+		if p.embedding != "" || p.vec != "" {
+			preservedChunks[c] = p
 		}
 	}
 	existingRows.Close()
@@ -931,13 +967,18 @@ func chunkArticleTx(ctx context.Context, tx pgx.Tx, articleID, content string) e
 		return err
 	}
 	for i, c := range chunks {
-		var emb any
-		if v, ok := preservedEmbeddings[c]; ok {
-			emb = v
+		var emb, vec any
+		if p, ok := preservedChunks[c]; ok {
+			if p.embedding != "" {
+				emb = p.embedding
+			}
+			if p.vec != "" {
+				vec = p.vec
+			}
 		}
 		if _, err := tx.Exec(ctx,
-			"INSERT INTO knowledge_chunks (id,article_id,content,chunk_index,embedding) VALUES ($1,$2,$3,$4,$5)",
-			genID(), articleID, c, i, emb); err != nil {
+			"INSERT INTO knowledge_chunks (id,article_id,content,chunk_index,embedding,vec) VALUES ($1,$2,$3,$4,$5,$6::vector)",
+			genID(), articleID, c, i, emb, vec); err != nil {
 			return err
 		}
 	}
@@ -1002,16 +1043,67 @@ func (s *Store) EmbedTexts(texts []string) []float32 {
 	return vecs[0]
 }
 
-// embedPendingChunks generates and stores embeddings for chunks of one article
-// (articleID == "" → all chunks lacking an embedding). Best-effort: failures
-// only log a warning, so article create/update never fails because the
-// embedding service is down; a background backfill catches up later.
-func (s *Store) embedPendingChunks(articleID string) {
+// startBackfillWorker launches a background goroutine that periodically sweeps
+// the knowledge_chunks table for rows missing an embedding or vector and
+// re-embeds them. It exists so chunks that lost their vec (e.g. legacy rows,
+// or chunks that raced the async embed on article create) eventually
+// re-enter ANN retrieval instead of silently staying invisible.
+//
+// Failure isolation: if the embedder is unreachable the worker logs a warn and
+// doubles the sleep interval up to backfillMaxInterval, so a down embedder
+// produces one warn per backoff tick rather than a hot loop. The worker
+// terminates when stopChan closes (i.e. on Store.Close).
+func (s *Store) startBackfillWorker() {
 	if s.embed == nil {
 		return
 	}
+	go s.runBackfillLoop()
+}
+
+const (
+	backfillBaseInterval = 60 * time.Second
+	backoffMaxInterval   = 5 * time.Minute
+)
+
+func (s *Store) runBackfillLoop() {
+	interval := backfillBaseInterval
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	for {
+		select {
+		case <-s.stopChan:
+			return
+		case <-timer.C:
+			if err := s.embedPendingChunks(""); err != nil {
+				interval *= 2
+				if interval > backoffMaxInterval {
+					interval = backoffMaxInterval
+				}
+			} else {
+				interval = backfillBaseInterval
+			}
+			timer.Reset(interval)
+		}
+	}
+}
+
+// embedPendingChunks generates and stores embeddings for chunks of one article
+// (articleID == "" → all chunks lacking an embedding). Best-effort: failures
+// only log a warning and are returned as error so callers like the backfill
+// worker can back off; article create/update launches this asynchronously and
+// discards the error.
+//
+// The pending filter covers BOTH the JSON text column and the pgvector vec
+// column: a chunk is pending if either is missing. This recovers chunks whose
+// vec was lost (e.g. pre-pgvector rows, or rows that went through a
+// chunkArticleTx cycle before vec preservation was added) instead of silently
+// excluding them from ANN retrieval.
+func (s *Store) embedPendingChunks(articleID string) error {
+	if s.embed == nil {
+		return nil
+	}
 	ctx := context.Background()
-	q := "SELECT id, content FROM knowledge_chunks WHERE embedding IS NULL"
+	q := "SELECT id, content FROM knowledge_chunks WHERE embedding IS NULL OR vec IS NULL"
 	args := []any{}
 	if articleID != "" {
 		q += " AND article_id=$1"
@@ -1020,7 +1112,7 @@ func (s *Store) embedPendingChunks(articleID string) {
 	rows, err := s.pool.Query(ctx, q, args...)
 	if err != nil {
 		slog.Warn("query pending chunks failed", "error", err)
-		return
+		return err
 	}
 	var ids, texts []string
 	for rows.Next() {
@@ -1028,19 +1120,19 @@ func (s *Store) embedPendingChunks(articleID string) {
 		if err := rows.Scan(&id, &content); err != nil {
 			rows.Close()
 			slog.Warn("scan pending chunk failed", "error", err)
-			return
+			return err
 		}
 		ids = append(ids, id)
 		texts = append(texts, content)
 	}
 	rows.Close()
 	if len(texts) == 0 {
-		return
+		return nil
 	}
 	vecs, err := s.embed.Embed(texts)
 	if err != nil {
 		slog.Warn("embed pending chunks failed", "count", len(texts), "error", err)
-		return
+		return err
 	}
 	for i := range vecs {
 		if i >= len(ids) {
@@ -1050,12 +1142,16 @@ func (s *Store) embedPendingChunks(articleID string) {
 			slog.Warn("update chunk embedding failed", "chunk_id", ids[i], "error", err)
 		}
 	}
+	return nil
 }
 
-// GetChunksWithoutEmbeddings returns chunks that need embedding.
+// GetChunksWithoutEmbeddings returns chunks that need embedding. The pending
+// filter matches embedPendingChunks: a chunk is pending if either the JSON
+// embedding text or the pgvector vec column is NULL, so rows missing only vec
+// are still re-embedded (and thus re-indexed for ANN search).
 func (s *Store) GetChunksWithoutEmbeddings(tenantID string, limit int) ([]ChunkInfo, error) {
 	rows, err := s.pool.Query(context.Background(),
-		"SELECT c.id, c.content FROM knowledge_chunks c JOIN knowledge_articles a ON c.article_id = a.id JOIN knowledge_bases k ON a.knowledge_base_id = k.id WHERE k.tenant_id=$1 AND c.embedding IS NULL LIMIT $2",
+		"SELECT c.id, c.content FROM knowledge_chunks c JOIN knowledge_articles a ON c.article_id = a.id JOIN knowledge_bases k ON a.knowledge_base_id = k.id WHERE k.tenant_id=$1 AND (c.embedding IS NULL OR c.vec IS NULL) LIMIT $2",
 		tenantID, limit)
 	if err != nil {
 		return nil, err
@@ -1139,6 +1235,7 @@ func (s *Store) SaveMessage(tenantID, accountID, conversationID, customerName, r
 	if err != nil {
 		return nil, err
 	}
+	upsertConversationSummary(s.pool, tenantID, accountID, conversationID, customerName, content)
 	return m, nil
 }
 
@@ -1204,6 +1301,7 @@ func (s *Store) saveAssistantReply(tenantID, accountID, conversationID, customer
 	).Scan(&m.CreatedAt); err != nil {
 		return nil, err
 	}
+	upsertConversationSummary(tx, tenantID, accountID, conversationID, customerName, content)
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
@@ -1228,6 +1326,107 @@ func (s *Store) deleteMessageByID(ctx context.Context, id string) error {
 	return err
 }
 
+// AssistantReplyByRetrievalToken looks up an assistant message previously saved
+// with the given retrieval token (stored in message_id). Returns pgx.ErrNoRows
+// when none exists — used by save_reply idempotency.
+func (s *Store) AssistantReplyByRetrievalToken(tenantID, conversationID, token string) (*model.ConversationMessage, error) {
+	m := &model.ConversationMessage{}
+	err := s.pool.QueryRow(context.Background(),
+		`SELECT id, conversation_id, account_id, customer_name, role, content, knowledge_ids,
+		        to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')
+		 FROM conversation_messages
+		 WHERE tenant_id=$1 AND conversation_id=$2 AND message_id=$3 AND role='assistant'`,
+		tenantID, conversationID, token,
+	).Scan(&m.ID, &m.ConversationID, &m.AccountID, &m.CustomerName, &m.Role, &m.Content, &m.KnowledgeIDs, &m.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// SaveAssistantReplyWithToken persists an assistant reply tagged with the
+// retrieval token (message_id) as an idempotency key, enforcing the daily
+// reply limit. Delivery is the caller's responsibility (OpenClaw already sent
+// the WhatsApp message; this only records it).
+func (s *Store) SaveAssistantReplyWithToken(tenantID, accountID, conversationID, customerName, content, knowledgeIDs, token string) (*model.ConversationMessage, error) {
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	var dailyLimit int
+	if err := tx.QueryRow(ctx, `SELECT daily_limit FROM accounts WHERE id=$1 AND tenant_id=$2 FOR UPDATE`, accountID, tenantID).Scan(&dailyLimit); err != nil {
+		return nil, err
+	}
+	if dailyLimit > 0 {
+		var repliesToday int
+		if err := tx.QueryRow(ctx,
+			`SELECT COUNT(*) FROM conversation_messages WHERE tenant_id=$1 AND account_id=$2 AND role='assistant' AND created_at >= date_trunc('day', CURRENT_TIMESTAMP)`,
+			tenantID, accountID,
+		).Scan(&repliesToday); err != nil {
+			return nil, err
+		}
+		if dailyReplyLimitReached(dailyLimit, repliesToday) {
+			return nil, ErrDailyReplyLimitReached
+		}
+	}
+	m := &model.ConversationMessage{
+		ID: genID(), ConversationID: conversationID, AccountID: accountID, CustomerName: customerName,
+		Role: "assistant", Content: content, KnowledgeIDs: knowledgeIDs,
+	}
+	if err := tx.QueryRow(ctx,
+		"INSERT INTO conversation_messages (id,tenant_id,account_id,conversation_id,customer_name,role,content,knowledge_ids,message_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')",
+		m.ID, tenantID, accountID, m.ConversationID, m.CustomerName, m.Role, m.Content, m.KnowledgeIDs, token,
+	).Scan(&m.CreatedAt); err != nil {
+		return nil, err
+	}
+	upsertConversationSummary(tx, tenantID, accountID, conversationID, customerName, content)
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// PendingInvitations lists not-yet-expired invitations for a tenant.
+func (s *Store) PendingInvitations(tenantID string) ([]model.PendingInvitation, error) {
+	rows, err := s.pool.Query(context.Background(),
+		`SELECT id, email, role,
+		        to_char(expires_at, 'YYYY-MM-DD HH24:MI:SS'),
+		        to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')
+		 FROM invitations WHERE tenant_id=$1 AND expires_at > NOW() ORDER BY created_at DESC`, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	var out []model.PendingInvitation
+	for rows.Next() {
+		var inv model.PendingInvitation
+		if err := rows.Scan(&inv.ID, &inv.Email, &inv.Role, &inv.ExpiresAt, &inv.CreatedAt); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out = append(out, inv)
+	}
+	rows.Close()
+	return out, rows.Err()
+}
+
+// InvitationByIDForTenant returns a pending invitation scoped to the tenant
+// (pgx.ErrNoRows if not found or cross-tenant).
+func (s *Store) InvitationByIDForTenant(tenantID, invitationID string) (*model.PendingInvitation, error) {
+	inv := &model.PendingInvitation{}
+	err := s.pool.QueryRow(context.Background(),
+		`SELECT id, email, role,
+		        to_char(expires_at, 'YYYY-MM-DD HH24:MI:SS'),
+		        to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')
+		 FROM invitations WHERE id=$1 AND tenant_id=$2 AND expires_at > NOW()`, invitationID, tenantID,
+	).Scan(&inv.ID, &inv.Email, &inv.Role, &inv.ExpiresAt, &inv.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return inv, nil
+}
+
 // SaveMessageIfAbsent saves a message idempotently. The previous SELECT-then-
 // INSERT had a TOCTOU race and the trailing ON CONFLICT DO NOTHING never matched
 // because the table had no unique constraint to conflict on. We now derive a
@@ -1244,7 +1443,13 @@ func (s *Store) SaveMessageIfAbsent(tenantID, accountID, conversationID, custome
 		"INSERT INTO conversation_messages (id,tenant_id,account_id,conversation_id,customer_name,role,content,knowledge_ids,message_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (tenant_id, conversation_id, message_id) WHERE message_id IS NOT NULL DO NOTHING",
 		genID(), tenantID, accountID, conversationID, customerName, role, content, knowledgeIDs, messageID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	// Idempotent: even if the message was deduped, the conversation summary
+	// should reflect the latest customer/last-message state.
+	upsertConversationSummary(s.pool, tenantID, accountID, conversationID, customerName, content)
+	return nil
 }
 
 // dedupMessageID derives a deterministic idempotency key for SaveMessageIfAbsent
@@ -1266,13 +1471,55 @@ func escapeILIKEPattern(s string) string {
 	return s
 }
 
+// upsertConversationSummary maintains a denormalized row in the conversations
+// table so ListConversationSummaries does not have to run three correlated
+// subqueries over conversation_messages per row. The previous design never
+// wrote to this table: it existed in the schema but stayed empty, which made
+// the summary query degrade as conversation_messages grew.
+//
+// Best-effort: errors only warn so message persistence is never blocked by the
+// summary table. Accepts either *pgxpool.Pool or pgx.Tx so it can run inside
+// saveAssistantReply's transaction or as a standalone write after SaveMessage.
+func upsertConversationSummary(exec accountDeletionExecutor, tenantID, accountID, conversationID, customerName, lastMessage string) {
+	if _, err := exec.Exec(context.Background(),
+		`INSERT INTO conversations (id,tenant_id,account_id,customer,last_message,status,last_message_at)
+		 VALUES ($1,$2,$3,$4,$5,'open',NOW())
+		 ON CONFLICT (id) DO UPDATE SET
+		     customer = EXCLUDED.customer,
+		     last_message = EXCLUDED.last_message,
+		     last_message_at = NOW()`,
+		conversationID, tenantID, accountID, customerName, lastMessage,
+	); err != nil {
+		slog.Warn("upsert conversation summary failed",
+			"conversation_id", conversationID, "tenant_id", tenantID, "account_id", accountID, "err", err)
+	}
+}
+
 func (s *Store) LoadHistory(tenantID, accountID, conversationID string, limit int) ([]model.ConversationMessage, error) {
+	return s.LoadHistoryBefore(tenantID, accountID, conversationID, limit, "", "")
+}
+
+// LoadHistoryBefore returns one page of messages strictly older than the
+// (beforeCursor, anchorID) tuple. Empty cursor means first page. The ORDER BY
+// uses (created_at DESC, id) so the tie-breaker is stable across pages and the
+// cursor filter (`created_at < before OR (created_at = before AND id > anchor)`)
+// skips exactly the rows already returned. beforeCursor is compared as
+// timestamptz to avoid timezone/text comparison ambiguity.
+func (s *Store) LoadHistoryBefore(tenantID, accountID, conversationID string, limit int, beforeCursor, anchorID string) ([]model.ConversationMessage, error) {
 	if limit <= 0 {
 		limit = 20
 	}
-	rows, err := s.pool.Query(context.Background(),
-		"SELECT id,conversation_id,account_id,customer_name,role,content,knowledge_ids,to_char(created_at, 'YYYY-MM-DD HH24:MI:SS') FROM conversation_messages WHERE tenant_id=$1 AND account_id=$2 AND conversation_id=$3 ORDER BY created_at DESC, id LIMIT $4",
-		tenantID, accountID, conversationID, limit)
+	q := "SELECT id,conversation_id,account_id,customer_name,role,content,knowledge_ids,to_char(created_at, 'YYYY-MM-DD HH24:MI:SS') FROM conversation_messages WHERE tenant_id=$1 AND account_id=$2 AND conversation_id=$3"
+	args := []any{tenantID, accountID, conversationID}
+	nextIdx := 4
+	if beforeCursor != "" && anchorID != "" {
+		q += fmt.Sprintf(" AND (created_at < $%d::timestamptz OR (created_at = $%d::timestamptz AND id > $%d::text))", nextIdx, nextIdx, nextIdx+1)
+		args = append(args, beforeCursor, anchorID)
+		nextIdx += 2
+	}
+	q += fmt.Sprintf(" ORDER BY created_at DESC, id LIMIT $%d", nextIdx)
+	args = append(args, limit)
+	rows, err := s.pool.Query(context.Background(), q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1408,6 +1655,24 @@ func (s *Store) DeleteKnowledgeBase(id, tenantID string) error {
 	return tx.Commit(ctx)
 }
 
+// ReindexKnowledgeBase nulls both the JSON embedding and the pgvector vec
+// columns for every chunk in the knowledge base. The backfill worker then
+// re-embeds them on its next tick, which rebuilds the HNSW index entries.
+// Tenant-scoped: returns success even if the KB has no chunks; callers that
+// need to distinguish "missing KB" should check existence first.
+func (s *Store) ReindexKnowledgeBase(id, tenantID string) error {
+	_, err := s.pool.Exec(context.Background(),
+		`UPDATE knowledge_chunks c
+		    SET embedding = NULL, vec = NULL
+		   FROM knowledge_articles a, knowledge_bases k
+		  WHERE c.article_id = a.id
+		    AND a.knowledge_base_id = k.id
+		    AND k.id = $1
+		    AND k.tenant_id = $2`,
+		id, tenantID)
+	return err
+}
+
 func (s *Store) ArticlesByKnowledgeBase(kbID, tenantID string) ([]model.KnowledgeArticle, error) {
 	rows, err := s.pool.Query(context.Background(),
 		`SELECT a.id,a.knowledge_base_id,a.title,a.content,a.category,a.attributes,a.status,
@@ -1462,7 +1727,10 @@ func (s *Store) CreateArticle(kbID, title, content, category, attributes string)
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	s.embedPendingChunks(a.ID)
+	// Async: embed.Embed can take up to the client's 60s timeout, but the
+	// HTTP handler (main.go WriteTimeout) is 30s. Synchronous embedding would
+	// tie the handler to the embedder's availability and time budget.
+	go s.embedPendingChunks(a.ID)
 	return a, nil
 }
 
@@ -1513,7 +1781,9 @@ func (s *Store) createArticlesBatch(ctx context.Context, kbID string, articles [
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
-	s.embedPendingChunks("")
+	// Async: large imports can produce thousands of pending chunks; running
+	// embedding in the foreground would blow the handler WriteTimeout.
+	go s.embedPendingChunks("")
 	return nil
 }
 
@@ -1567,7 +1837,10 @@ func (s *Store) UpdateArticle(id, kbID, tenantID string, title, content, categor
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	s.embedPendingChunks(a.ID)
+	// Async so editing an article returns immediately; embedding runs in the
+	// background (preserved chunks keep their vec via chunkArticleTx, only
+	// genuinely new/changed chunks get re-embedded).
+	go s.embedPendingChunks(a.ID)
 	return a, nil
 }
 

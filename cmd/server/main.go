@@ -49,18 +49,40 @@ func run() error {
 	if err := seedPlatformAdmin(st); err != nil {
 		return fmt.Errorf("seed admin: %w", err)
 	}
-	if err := handler.SyncOpenClawRAGAccounts(st); err != nil {
-		return fmt.Errorf("sync OpenClaw RAG accounts: %w", err)
-	}
+	// Sync OpenClaw RAG routes asynchronously so a slow or partially-failed
+	// reconcile (e.g. OpenClaw briefly unreachable at boot) cannot block the
+	// HTTP server from coming up. The goroutine logs errors but never returns
+	// one: SyncOpenClawRAGAccounts is designed to be idempotent and
+	// self-healing on the next restart, and the previous blocking behaviour
+	// made the whole server fail to start if OpenClaw was restarting at the
+	// same time.
+	go func() {
+		if err := handler.SyncOpenClawRAGAccounts(st); err != nil {
+			slog.Default().Warn("background OpenClaw RAG sync reported errors", "error", err)
+		}
+	}()
 
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
 	router.Use(gin.Recovery())
 
-	// Health
-	router.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	// Health probes.
+	//   /health/live  — process is alive; always 200 if the binary can serve.
+	//                   Used by liveness probes that should NEVER take traffic
+	//                   down unless the process itself is gone.
+	//   /health/ready — composite readiness: Postgres SELECT 1, the embedding
+	//                   service HTTP ping, and OpenClaw reachability. Returns
+	//                   503 with the failing component when any check fails
+	//                   so the LB can drain traffic without killing the pod.
+	//   /health       — legacy alias for /health/ready so existing probes
+	//                   that point at the root health path keep working and
+	//                   gain the deeper semantics.
+	readyHandler := handler.MakeReadyHandler(st)
+	router.GET("/health/live", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "alive"})
 	})
+	router.GET("/health/ready", readyHandler)
+	router.GET("/health", readyHandler)
 
 	// Auth routes: login is public (registered before the .Use chain so it
 	// is exempt from Auth/CSRF); logout and select-tenant are mutating POSTs

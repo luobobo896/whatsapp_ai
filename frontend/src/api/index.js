@@ -1,3 +1,5 @@
+import { setSession } from "../composables/useSession";
+
 export class APIError extends Error {
   constructor(message, code, status, requestId) {
     super(message);
@@ -19,20 +21,63 @@ const ERROR_MESSAGES = {
   OPENCLAW_ERROR: "OpenClaw 服务异常，请检查 OpenClaw 是否正常运行。",
 };
 
+// Distinguish network failures (DNS/down/offline) from server-side 5xx so views
+// can show actionable messages instead of relying on each one to interpret status.
+const NETWORK_ERROR_MESSAGE = "网络连接失败，请检查网络后重试。";
+const SERVER_ERROR_MESSAGE = "服务暂时不可用，请稍后重试。";
+
+// Endpoints that authenticate themselves (login / invitation acceptance) must not
+// trigger the global "session expired" redirect when they return 401.
+const SESSION_AUTH_PATH_PREFIXES = ["/api/auth/login", "/api/invitations/"];
+
+// Module-level guard so concurrent in-flight 401s only redirect once.
+let sessionExpiryHandling = false;
+
+function isSessionAuthPath(path) {
+  return SESSION_AUTH_PATH_PREFIXES.some((prefix) => path.startsWith(prefix));
+}
+
+function handleSessionExpired() {
+  if (sessionExpiryHandling) return;
+  sessionExpiryHandling = true;
+  try {
+    setSession(null);
+  } catch {
+    // setSession may fail in non-browser contexts; ignore — the redirect below still handles it.
+  }
+  if (typeof window !== "undefined" && window.location) {
+    const current = window.location.pathname || "";
+    if (current !== "/login" && !current.startsWith("/invitations/")) {
+      window.location.assign("/login");
+    }
+  }
+}
+
 export function messageForError(error) {
-  if (error instanceof APIError) return ERROR_MESSAGES[error.code] || error.message;
+  if (error instanceof APIError) {
+    if (error.code === "NETWORK_ERROR") return NETWORK_ERROR_MESSAGE;
+    if (error.status >= 500) return SERVER_ERROR_MESSAGE;
+    return ERROR_MESSAGES[error.code] || error.message;
+  }
   return "暂时无法完成请求，请稍后重试。";
 }
 
 async function request(path, options = {}) {
-  const response = await fetch(path, {
-    credentials: "same-origin",
-    ...options,
-    headers: {
-      ...(options.body && !(options.body instanceof FormData) ? { "Content-Type": "application/json" } : {}),
-      ...options.headers,
-    },
-  });
+  let response;
+  try {
+    response = await fetch(path, {
+      credentials: "same-origin",
+      ...options,
+      headers: {
+        ...(options.body && !(options.body instanceof FormData) ? { "Content-Type": "application/json" } : {}),
+        ...options.headers,
+      },
+    });
+  } catch {
+    // fetch() throws TypeError on network-level failures (DNS, connection refused,
+    // offline). Surface as a dedicated code so callers can distinguish from HTTP 5xx.
+    throw new APIError(NETWORK_ERROR_MESSAGE, "NETWORK_ERROR", 0, undefined);
+  }
 
   if (!response.ok) {
     let payload = null;
@@ -42,10 +87,16 @@ async function request(path, options = {}) {
       // The fallback message below is used for non-JSON failures.
     }
     const details = payload?.error;
+    const status = response.status;
+    // Centralized 401 handling: clear session + redirect to /login. Skip for login/
+    // invitation endpoints so wrong-credentials on those pages stays actionable.
+    if (status === 401 && !isSessionAuthPath(path)) {
+      handleSessionExpired();
+    }
     throw new APIError(
-      details?.message || `请求失败 (${response.status})`,
-      details?.code || "REQUEST_FAILED",
-      response.status,
+      details?.message || (status >= 500 ? SERVER_ERROR_MESSAGE : `请求失败 (${status})`),
+      details?.code || (status >= 500 ? "SERVER_ERROR" : "REQUEST_FAILED"),
+      status,
       details?.requestId,
     );
   }
@@ -96,4 +147,15 @@ export function put(path, body, csrfToken) {
     body: JSON.stringify(body),
     headers: { "X-CSRF-Token": csrfToken },
   });
+}
+
+// Members invitations — list pending and revoke. Backend contract assumed:
+//   GET    /api/members/invitations          -> { invitations: [...] }
+//   DELETE /api/members/invitations/:id      -> 204
+export function listInvitations() {
+  return get("/api/members/invitations").then((resp) => resp?.invitations || []);
+}
+
+export function revokeInvitation(invitationId, csrfToken) {
+  return del(`/api/members/invitations/${encodeURIComponent(invitationId)}`, csrfToken);
 }

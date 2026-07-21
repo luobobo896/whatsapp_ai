@@ -130,3 +130,39 @@ func TestEscapeILIKEPattern(t *testing.T) {
 		})
 	}
 }
+
+// TestUpdateAccountRejectsEmptyUpdate guards the regression where all-nil/
+// empty parameters produced "UPDATE accounts WHERE ..." (syntax error only
+// surfaced at runtime). The early return must fire before any SQL is built.
+func TestUpdateAccountRejectsEmptyUpdate(t *testing.T) {
+	s := &Store{}
+	_, err := s.UpdateAccount("tenant-1", "account-1", "", "", nil, nil, nil)
+	if err == nil {
+		t.Fatal("UpdateAccount empty update returned nil error")
+	}
+	if !strings.Contains(err.Error(), "nothing to update") {
+		t.Fatalf("UpdateAccount empty err = %q, want substring 'nothing to update'", err.Error())
+	}
+}
+
+// TestFormatVectorText covers the pgvector literal format used by both
+// UpdateChunkEmbedding and the HNSW-backed ANN queries. A wrong format here
+// silently breaks retrieval (the vec cast returns NULL or errors).
+func TestFormatVectorText(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []float32
+		want string
+	}{
+		{name: "empty", in: []float32{}, want: "[]"},
+		{name: "single", in: []float32{0.5}, want: "[0.5]"},
+		{name: "negative and zero", in: []float32{0, -1.5, 2.25}, want: "[0,-1.5,2.25]"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatVectorText(tt.in); got != tt.want {
+				t.Fatalf("formatVectorText(%v) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}

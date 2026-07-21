@@ -155,6 +155,20 @@ type InviteResponse struct {
 	Invitation Invitation `json:"invitation"`
 }
 
+// PendingInvitation is an outstanding (not-yet-accepted) tenant invitation
+// surfaced to tenant admins so they can revoke stale invites.
+type PendingInvitation struct {
+	ID        string `json:"id"`
+	Email     string `json:"email"`
+	Role      string `json:"role"`
+	ExpiresAt string `json:"expiresAt"`
+	CreatedAt string `json:"createdAt"`
+}
+
+type PendingInvitationsResponse struct {
+	Invitations []PendingInvitation `json:"invitations"`
+}
+
 // -- account --
 
 type Account struct {
@@ -286,6 +300,11 @@ type SaveReplyRequest struct {
 	CustomerName   string `json:"customerName"`
 	Content        string `json:"content"`
 	KnowledgeIDs   string `json:"knowledgeIds"`
+	// RetrievalToken is the idempotency token returned by the originating
+	// /conversations/query call. When set, the server collapses repeated saves
+	// for the same token into a single assistant reply so retries do not
+	// double-insert or double-count the daily quota.
+	RetrievalToken string `json:"retrievalToken,omitempty"`
 }
 
 // SendConversationReplyRequest is the operator's reply to a single customer
@@ -302,9 +321,15 @@ type ConversationQueryRequest struct {
 	ConversationID string `json:"conversationId"`
 	CustomerName   string `json:"customerName"`
 	Message        string `json:"message"`
-	AccountID      string `json:"accountId"`
-	MaxHistory     int    `json:"maxHistory"`
-	MaxKnowledge   int    `json:"maxKnowledge"`
+	// SearchQuery is an optional explicit search query. When non-empty it is
+	// used as the knowledge-base retrieval query instead of Message (which may
+	// contain conversational filler that hurts retrieval). Agent C (rag-mcp)
+	// populates this when it extracts a cleaner search terms from the user
+	// message before calling the query API.
+	SearchQuery  string `json:"searchQuery,omitempty"`
+	AccountID    string `json:"accountId"`
+	MaxHistory   int    `json:"maxHistory"`
+	MaxKnowledge int    `json:"maxKnowledge"`
 	// History provided by OpenClaw (its own stored messages, chronological order).
 	// When present, used directly as context and persisted locally for traceability.
 	// When absent, history is loaded from the local database.
@@ -327,6 +352,11 @@ type ConversationQueryResponse struct {
 	// (e.g. when knowledge search returns empty). When non-empty, the caller
 	// should skip the LLM and send this text directly to the user.
 	DirectReply string `json:"directReply,omitempty"`
+	// RetrievalToken is a server-generated idempotency token that the caller
+	// (Agent C / rag-mcp) must echo back in the subsequent save_reply request.
+	// Re-using the same token results in a no-op instead of a duplicate reply
+	// insert, which prevents retry storms from double-counting the daily quota.
+	RetrievalToken string `json:"retrievalToken,omitempty"`
 }
 
 type HistoryMessage struct {

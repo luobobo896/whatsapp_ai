@@ -55,6 +55,21 @@ var (
 	channelStatusVersion uint64
 )
 
+// Background status-sync worker: periodically refreshes every WhatsApp
+// account's live connection status, persists observed drops/revivals, and
+// best-effort retries disconnected accounts through the shared OpenClaw
+// gateway. Bounded retry prevents storming the gateway on persistent
+// failures (e.g. session revoked — needs a fresh QR scan).
+var (
+	statusSyncWorkerOnce     sync.Once
+	statusSyncReconnectFails sync.Map // accountKey -> consecutive failed reconnect attempts
+)
+
+const (
+	statusSyncInterval          = 45 * time.Second
+	statusSyncReconnectMaxFails = 3
+)
+
 const (
 	qrBridgeTimeout           = 25 * time.Second
 	qrCodeTTL                 = 45 * time.Second
@@ -515,14 +530,21 @@ func removeOpenClawRAGConfig(cfg map[string]any, accountKey string) bool {
 			}
 		}
 	}
+	// Both the live agent id ("whatsapp-<key>") and the pre-fix legacy agent
+	// id ("whatsapp-rag-<key>") may be present in older deployments; clean
+	// both so neither lingers as an orphan after delete/disable.
 	agentID := openClawRAGAgentID(accountKey)
+	legacyAgentID := openClawLegacyRAGAgentID(accountKey)
 	if agents, ok := cfg["agents"].(map[string]any); ok {
 		if list, ok := agents["list"].([]any); ok {
 			filtered := list[:0]
 			for _, raw := range list {
-				if agent, ok := raw.(map[string]any); ok && agent["id"] == agentID {
-					changed = true
-					continue
+				if agent, ok := raw.(map[string]any); ok {
+					id, _ := agent["id"].(string)
+					if id == agentID || id == legacyAgentID {
+						changed = true
+						continue
+					}
 				}
 				filtered = append(filtered, raw)
 			}
@@ -533,10 +555,17 @@ func removeOpenClawRAGConfig(cfg map[string]any, accountKey string) bool {
 		filtered := bindings[:0]
 		for _, raw := range bindings {
 			binding, ok := raw.(map[string]any)
-			match, _ := binding["match"].(map[string]any)
-			if ok && binding["agentId"] == agentID && match["channel"] == "whatsapp" && match["accountId"] == accountKey {
-				changed = true
+			if !ok {
+				filtered = append(filtered, raw)
 				continue
+			}
+			match, _ := binding["match"].(map[string]any)
+			if match["channel"] == "whatsapp" && match["accountId"] == accountKey {
+				existingAgentID, _ := binding["agentId"].(string)
+				if existingAgentID == agentID || existingAgentID == legacyAgentID {
+					changed = true
+					continue
+				}
 			}
 			filtered = append(filtered, raw)
 		}
@@ -1094,6 +1123,108 @@ func invalidateWhatsAppChannelStatuses() {
 	channelStatusCache = nil
 	channelStatusCacheAt = time.Time{}
 	channelStatusVersion++
+}
+
+// startWhatsAppStatusSyncWorker launches the background status-sync goroutine
+// once. It is safe to call repeatedly (e.g. from RegisterAccounts); subsequent
+// calls are no-ops. The worker does not block the caller.
+func startWhatsAppStatusSyncWorker(st *store.Store) {
+	statusSyncWorkerOnce.Do(func() {
+		go runWhatsAppStatusSyncWorker(st)
+	})
+}
+
+func runWhatsAppStatusSyncWorker(st *store.Store) {
+	ticker := time.NewTicker(statusSyncInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		syncWhatsAppAccountStatuses(st)
+	}
+}
+
+// syncWhatsAppAccountStatuses mirrors applyLiveAccountStatuses across every
+// tenant: it refreshes live channel statuses, persists observed transitions,
+// and triggers one bounded shared-gateway restart per tick when any account is
+// offline. Per-account failure counters stop reconnect attempts after
+// statusSyncReconnectMaxFails consecutive failures until the account is
+// observed online again (manual QR rescan, operator action, etc.).
+func syncWhatsAppAccountStatuses(st *store.Store) {
+	if !isOpenClawAvailable() {
+		return
+	}
+	statuses := readAllWhatsAppChannelStatuses()
+	accounts, err := st.AllAccounts()
+	if err != nil {
+		slog.Warn("whatsapp status sync: load accounts", "error", err)
+		return
+	}
+	var offline []model.AccountRow
+	for i := range accounts {
+		account := accounts[i]
+		if account.Status == "disabled" {
+			continue
+		}
+		live, ok := statuses[account.AccountKey]
+		if !ok || !live.Known {
+			continue
+		}
+		// "Online" requires the channel to be known, running AND connected.
+		// Anything else (linked but not running, running but not connected,
+		// etc.) counts as offline and triggers a bounded reconnect below —
+		// even when DB already says "pending", so a stuck account keeps
+		// retrying until the budget is exhausted.
+		online := live.Running && live.Connected
+		wantStatus := "pending"
+		if online {
+			wantStatus = "connected"
+		}
+		if account.Status != wantStatus {
+			if _, err := st.UpdateAccount(account.TenantID, account.ID, "", wantStatus, nil, nil, nil); err != nil {
+				slog.Warn("whatsapp status sync: persist status",
+					"account_id", account.ID, "account_key", account.AccountKey,
+					"status", wantStatus, "error", err)
+				continue
+			}
+		}
+		if online {
+			statusSyncReconnectFails.Delete(account.AccountKey)
+			continue
+		}
+		slog.Warn("whatsapp account disconnected",
+			"account_id", account.ID, "account_key", account.AccountKey,
+			"running", live.Running, "connected", live.Connected)
+		offline = append(offline, account)
+	}
+	if len(offline) == 0 {
+		return
+	}
+	// Shared OpenClaw gateway: one restart per tick covers every offline
+	// account. First ensure each offline account's RAG route is in place
+	// (cheap, idempotent), then bounce the gateway once.
+	restarted := false
+	for i := range offline {
+		account := offline[i]
+		fails, _ := statusSyncReconnectFails.Load(account.AccountKey)
+		failCount, _ := fails.(int)
+		if failCount >= statusSyncReconnectMaxFails {
+			slog.Warn("whatsapp reconnect budget exhausted; awaiting manual recovery",
+				"account_key", account.AccountKey, "attempts", failCount)
+			continue
+		}
+		if _, err := ensureOpenClawRAGAccount(account.ID, account.AccountKey); err != nil {
+			slog.Warn("whatsapp reconnect: ensure RAG account",
+				"account_key", account.AccountKey, "error", err)
+		}
+		if !restarted {
+			if err := restartOpenClawGatewaySafely(); err != nil {
+				slog.Warn("whatsapp reconnect: restart gateway", "error", err)
+			} else {
+				invalidateWhatsAppChannelStatuses()
+			}
+			restarted = true
+		}
+		statusSyncReconnectFails.Store(account.AccountKey, failCount+1)
+	}
 }
 
 func parseOpenClawChannelStatusPayload(data []byte) (openClawChannelStatusPayload, error) {
@@ -1693,6 +1824,7 @@ func sendOpenClawWhatsAppMessage(accountKey, conversationID, content string) err
 }
 
 func RegisterAccounts(r *gin.RouterGroup, st *store.Store) {
+	startWhatsAppStatusSyncWorker(st)
 	r.GET("", handleListAccounts(st))
 	RegisterAccountManagement(r, st)
 }

@@ -55,8 +55,9 @@ async function submit() {
         <el-form-item label="每日回复上限">
           <el-input-number v-model="dailyLimit" :min="0" :max="10000" controls-position="right" />
         </el-form-item>
-        <el-form-item label="每次加载消息上限">
+        <el-form-item label="单次拉取消息数">
           <el-input-number v-model="replyLimit" :min="1" :max="500" controls-position="right" />
+          <div class="account-limit-hint">每次从 WhatsApp 拉取的历史消息条数，与「每日回复上限」相互独立</div>
         </el-form-item>
       </div>
     </el-form>
@@ -66,3 +67,12 @@ async function submit() {
     </template>
   </el-dialog>
 </template>
+
+<style scoped>
+.account-limit-hint {
+  margin: 4px 0 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--app-muted);
+}
+</style>

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -144,5 +145,69 @@ func TestSaveReplyMissingConversationID(t *testing.T) {
 	handleSaveReply(nil)(c)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestClampNonPositive(t *testing.T) {
+	tests := []struct {
+		name           string
+		value          int
+		fallback, cap_ int
+		want           int
+	}{
+		{name: "zero uses fallback", value: 0, fallback: 10, cap_: 50, want: 10},
+		{name: "negative uses fallback", value: -5, fallback: 10, cap_: 50, want: 10},
+		{name: "in-range passes through", value: 7, fallback: 10, cap_: 50, want: 7},
+		{name: "over cap is clamped", value: 999, fallback: 10, cap_: 50, want: 50},
+		{name: "exact cap allowed", value: 50, fallback: 10, cap_: 50, want: 50},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := clampNonPositive(tt.value, tt.fallback, tt.cap_); got != tt.want {
+				t.Fatalf("clampNonPositive(%d,%d,%d) = %d, want %d", tt.value, tt.fallback, tt.cap_, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEffectiveSearchQueryFallsBackToMessage(t *testing.T) {
+	req := &model.ConversationQueryRequest{Message: "hello"}
+	if got := effectiveSearchQuery(req); got != "hello" {
+		t.Fatalf("expected fallback to message, got %q", got)
+	}
+}
+
+func TestEffectiveSearchQueryPrefersExplicit(t *testing.T) {
+	req := &model.ConversationQueryRequest{Message: "raw", SearchQuery: "退款政策"}
+	if got := effectiveSearchQuery(req); got != "退款政策" {
+		t.Fatalf("expected explicit SearchQuery, got %q", got)
+	}
+}
+
+func TestEffectiveSearchQueryBlankFallsBack(t *testing.T) {
+	req := &model.ConversationQueryRequest{Message: "raw", SearchQuery: "   "}
+	if got := effectiveSearchQuery(req); got != "raw" {
+		t.Fatalf("expected blank SearchQuery to fall back, got %q", got)
+	}
+}
+
+func TestGenerateRetrievalTokenIsDeterministicWithinSameSecond(t *testing.T) {
+	now := time.Now()
+	a := generateRetrievalToken("conv-1", now)
+	b := generateRetrievalToken("conv-1", now)
+	if a != b {
+		t.Fatalf("expected deterministic token within the same second, got %q vs %q", a, b)
+	}
+	if a == "" {
+		t.Fatal("token must not be empty")
+	}
+}
+
+func TestGenerateRetrievalTokenDiffersByConversation(t *testing.T) {
+	now := time.Now()
+	a := generateRetrievalToken("conv-1", now)
+	b := generateRetrievalToken("conv-2", now)
+	if a == b {
+		t.Fatal("tokens for different conversations must differ")
 	}
 }

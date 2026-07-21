@@ -6,6 +6,7 @@ import {
   Circle,
   Info,
   MessageSquareText,
+  RefreshCw,
   Search,
   SendHorizontal,
   ShieldCheck,
@@ -35,6 +36,15 @@ const sending = ref(false);
 const chatBody = ref(null);
 const searchInput = ref(null);
 const inspector = ref(null);
+// Upward pagination state. hasMoreOlder=false disables further fetches once the
+// backend returns a short page (fewer than `limit`) so we don't keep hammering.
+const loadingOlder = ref(false);
+const hasMoreOlder = ref(true);
+// Network status: derived from polling outcomes. When the long-poll loop repeatedly
+// fails (network drop / 5xx), we surface a reconnect banner above the message stream.
+const NETWORK_OK_THRESHOLD = 2;
+const pollFailures = ref(0);
+const networkStatus = ref("connected");
 let pollTimer = null;
 let messageRequestVersion = 0;
 let polling = false;
@@ -108,11 +118,18 @@ async function loadMessages(conv) {
   const requestVersion = ++messageRequestVersion;
   selectedConv.value = conv;
   loadingMsgs.value = true;
+  // Reset upward pagination + network banner for the freshly loaded conversation.
+  hasMoreOlder.value = true;
+  pollFailures.value = 0;
+  networkStatus.value = "connected";
   try {
     const limit = props.account.replyLimit || 30;
     const resp = await get(`/api/conversations/${conv.conversationId}/messages?accountId=${encodeURIComponent(props.account.id)}&limit=${limit}`);
     if (requestVersion !== messageRequestVersion) return;
     messages.value = (resp.messages || []).reverse();
+    // Backend returns a full `limit` page when more history exists. A short page
+    // means we have reached the earliest message for this conversation.
+    if (messages.value.length < limit) hasMoreOlder.value = false;
   } catch (error) {
     if (requestVersion !== messageRequestVersion) return;
     messages.value = [];
@@ -124,6 +141,56 @@ async function loadMessages(conv) {
       scrollToBottom();
     }
   }
+}
+
+// Fetch the page strictly older than the current earliest message. Uses the
+// earliest message's createdAt as the `before` cursor (Agent A's store contract).
+async function loadOlderMessages() {
+  if (loadingOlder.value || !hasMoreOlder.value || loadingMsgs.value) return;
+  if (!selectedConv.value || !messages.value.length) return;
+  const chatEl = chatBody.value;
+  const previousScrollHeight = chatEl?.scrollHeight || 0;
+  const previousScrollTop = chatEl?.scrollTop || 0;
+  loadingOlder.value = true;
+  try {
+    const limit = props.account.replyLimit || 30;
+    const before = encodeURIComponent(messages.value[0].createdAt);
+    const resp = await get(
+      `/api/conversations/${selectedConv.value.conversationId}/messages?accountId=${encodeURIComponent(props.account.id)}&limit=${limit}&before=${before}`,
+    );
+    const older = (resp.messages || []).reverse();
+    if (!older.length) {
+      hasMoreOlder.value = false;
+    } else {
+      messages.value = [...older, ...messages.value];
+      if (older.length < limit) hasMoreOlder.value = false;
+      // Preserve the user's visual position: keep the previously top message at
+      // roughly the same viewport offset after prepending older rows.
+      await nextTick();
+      if (chatEl) {
+        const delta = chatEl.scrollHeight - previousScrollHeight;
+        chatEl.scrollTop = previousScrollTop + delta;
+      }
+    }
+  } catch (error) {
+    showToast({ tone: "error", message: messageForError(error) });
+  } finally {
+    loadingOlder.value = false;
+  }
+}
+
+function onChatScroll() {
+  const el = chatBody.value;
+  if (!el || loadingOlder.value || loadingMsgs.value || !hasMoreOlder.value) return;
+  // Trigger upward pagination when the user scrolls within 64px of the top.
+  if (el.scrollTop < 64) loadOlderMessages();
+}
+
+function reconnect() {
+  if (!selectedConv.value) return;
+  pollFailures.value = 0;
+  networkStatus.value = "connected";
+  loadMessages(selectedConv.value);
 }
 
 function scrollToBottom() {
@@ -178,8 +245,13 @@ function startPolling(conv) {
         await nextTick();
         scrollToBottom();
       }
+      pollFailures.value = 0;
+      networkStatus.value = "connected";
     } catch {
-      // Polling failures should not interrupt manual replies.
+      // Polling failures should not interrupt manual replies. After repeated
+      // failures (network drop / server unavailable), surface a reconnect banner.
+      pollFailures.value += 1;
+      if (pollFailures.value >= NETWORK_OK_THRESHOLD) networkStatus.value = "disconnected";
     } finally {
       polling = false;
     }
@@ -262,7 +334,7 @@ loadConversations();
         <div class="chat-main-identity"><span class="chat-avatar is-large">?</span><div><h2>选择一个会话</h2><p>从左侧列表打开客户对话</p></div></div>
       </div>
 
-      <div ref="chatBody" class="chat-message-stream">
+      <div ref="chatBody" class="chat-message-stream" @scroll="onChatScroll">
         <div v-if="!selectedConv" class="chat-empty-main">
           <span class="chat-empty-icon"><MessageSquareText :size="24" /></span>
           <strong>开始处理客户会话</strong>
@@ -275,6 +347,13 @@ loadConversations();
           <span>发送第一条人工回复，开始处理这个客户。</span>
         </div>
         <template v-else>
+          <div v-if="networkStatus === 'disconnected'" class="chat-network-banner" role="status">
+            <span>实时更新已暂停：网络或服务不可用</span>
+            <el-button size="small" type="primary" plain :icon="RefreshCw" :loading="loadingMsgs" @click="reconnect">重连</el-button>
+          </div>
+          <div v-if="loadingOlder" class="chat-load-more chat-load-more-loading" aria-live="polite">正在加载更早的消息...</div>
+          <div v-else-if="hasMoreOlder" class="chat-load-more">向上滚动查看更早的消息</div>
+          <div v-else class="chat-load-more is-muted">已到达最早的消息</div>
           <div class="chat-date-divider"><span>消息记录</span></div>
           <article v-for="message in messages" :key="message.id" class="chat-message-row" :class="{ 'is-customer': message.role === 'customer' }">
             <div class="chat-message-bubble">
@@ -341,3 +420,31 @@ loadConversations();
     </aside>
   </div>
 </template>
+
+<style scoped>
+.chat-network-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 14px;
+  margin: 0 0 8px;
+  border-radius: 8px;
+  background: #fdf1e7;
+  color: #b54708;
+  border: 1px solid #f3c98b;
+  font-size: 12px;
+}
+.chat-load-more {
+  text-align: center;
+  font-size: 12px;
+  color: #6b736d;
+  padding: 6px 0;
+}
+.chat-load-more.is-muted {
+  color: #a8aea7;
+}
+.chat-load-more-loading {
+  color: #128c7e;
+}
+</style>

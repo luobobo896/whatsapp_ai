@@ -1,14 +1,20 @@
 package handler
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5"
 
 	"whatsapp-ai-poc/internal/middleware"
 	"whatsapp-ai-poc/internal/model"
@@ -16,6 +22,66 @@ import (
 )
 
 var sendWhatsAppReply = sendOpenClawWhatsAppMessage
+
+// maxHistoryCap limits how much conversation history a single caller can
+// request. Above this the cost of loading, transferring and asking the LLM to
+// consume history grows without improving answer quality.
+const maxHistoryCap = 50
+
+// maxKnowledgeCap bounds the number of retrieved knowledge chunks returned per
+// query. The embedding search itself is cheap but each result is fed verbatim
+// into the system prompt, so an unbounded limit would balloon token cost and
+// confuse the model.
+const maxKnowledgeCap = 50
+
+// retrievalTokenSalt is mixed into the retrieval token hash so that the token
+// cannot be trivially recomputed from outside (it does not have to be a
+// secret: the token is only an idempotency key, but a stable non-guessable
+// value prevents clients from colliding on each other's tokens).
+const retrievalTokenSalt = "whatsapp-ai:retrieval:2026-07"
+
+// clampNonPositive returns fallback when value is zero/negative, and cap when
+// value exceeds cap. Used for MaxHistory / MaxKnowledge query parameters.
+func clampNonPositive(value, fallback, cap int) int {
+	if value <= 0 {
+		return fallback
+	}
+	if value > cap {
+		return cap
+	}
+	return value
+}
+
+// effectiveSearchQuery returns the search query that should be used for
+// knowledge-base retrieval: an explicit SearchQuery when provided, falling
+// back to the raw customer Message. Agent C (rag-mcp) may pre-extract a
+// cleaner query from the user message before calling the query endpoint;
+// when it does not, the message itself is still a reasonable search input.
+func effectiveSearchQuery(req *model.ConversationQueryRequest) string {
+	if q := strings.TrimSpace(req.SearchQuery); q != "" {
+		return q
+	}
+	return req.Message
+}
+
+// generateRetrievalToken returns a deterministic-but-unique idempotency token
+// for one (conversationId, timestamp) pair. The timestamp is second-granular
+// which is sufficient to distinguish successive queries while collapsing
+// legitimate retries of the SAME query (within the same second) into one
+// reply. The hash is salted so the token is not equal to a raw conversationId
+// (which a client could guess).
+func generateRetrievalToken(conversationID string, now time.Time) string {
+	h := sha256.New()
+	h.Write([]byte(conversationID))
+	h.Write([]byte{0})
+	// Second granularity: retries within the same second collapse, but a
+	// genuine follow-up query a few seconds later gets a fresh token.
+	ts := now.Unix()
+	tsBytes := []byte(fmt.Sprintf("%d|%s", ts, retrievalTokenSalt))
+	h.Write(tsBytes)
+	sum := h.Sum(nil)
+	return hex.EncodeToString(sum[:16])
+}
 
 func RegisterConversations(r *gin.RouterGroup, st *store.Store) {
 	RegisterConversationRead(r, st)
@@ -130,12 +196,8 @@ func handleInternalConversationQuery(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "message and conversationId are required."}})
 			return
 		}
-		if req.MaxHistory <= 0 {
-			req.MaxHistory = 10
-		}
-		if req.MaxKnowledge <= 0 {
-			req.MaxKnowledge = 5
-		}
+		req.MaxHistory = clampNonPositive(req.MaxHistory, 10, maxHistoryCap)
+		req.MaxKnowledge = clampNonPositive(req.MaxKnowledge, 5, maxKnowledgeCap)
 		if !validConversationHistory(req.History) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "History contains an invalid message."}})
 			return
@@ -162,8 +224,12 @@ func handleInternalConversationQuery(st *store.Store) gin.HandlerFunc {
 			return
 		}
 
-		// 2. Search only the knowledge bases bound to this account.
-		results, err := st.SearchKnowledgeForBases(tenantID, accountKnowledgeBaseIDs(acctRow), req.Message, st.EmbedTexts([]string{req.Message}), req.MaxKnowledge)
+		// 2. Search only the knowledge bases bound to this account. Use the
+		//    explicit SearchQuery when provided (Agent C may extract a cleaner
+		//    query from the raw message); otherwise fall back to the raw
+		//    customer message.
+		searchQuery := effectiveSearchQuery(&req)
+		results, err := st.SearchKnowledgeForBases(tenantID, accountKnowledgeBaseIDs(acctRow), searchQuery, st.EmbedTexts([]string{searchQuery}), req.MaxKnowledge)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to search knowledge."}})
 			return
@@ -211,11 +277,12 @@ func handleInternalConversationQuery(st *store.Store) gin.HandlerFunc {
 		systemPrompt := buildSystemPrompt(accountName, knowledgeText)
 
 		c.JSON(http.StatusOK, model.ConversationQueryResponse{
-			SystemPrompt: systemPrompt,
-			Knowledge:    results,
-			History:      history,
-			ReplyTo:      req.ConversationID,
-			DirectReply:  directReply,
+			SystemPrompt:   systemPrompt,
+			Knowledge:      results,
+			History:        history,
+			ReplyTo:        req.ConversationID,
+			DirectReply:    directReply,
+			RetrievalToken: generateRetrievalToken(req.ConversationID, time.Now()),
 		})
 	}
 }
@@ -235,6 +302,50 @@ func handleInternalSaveReply(st *store.Store) gin.HandlerFunc {
 		if req.KnowledgeIDs == "" {
 			req.KnowledgeIDs = "[]"
 		}
+
+		// Idempotency: when the caller supplies the RetrievalToken returned by
+		// the originating /query call, look up an existing assistant reply
+		// persisted with that token first. If found, return it without
+		// inserting again so Agent C retries (timeout, network blip) do not
+		// double-count the daily quota or duplicate the message in history.
+		//
+		// The lookup uses the conversation_messages.message_id column, which
+		// already has a partial unique index (idx_conv_msg_dedup) so the same
+		// token cannot be served by two rows. The store method is implemented
+		// by Agent A in pg.go as SaveAssistantReplyWithToken.
+		if token := strings.TrimSpace(req.RetrievalToken); token != "" {
+			if existing, lookupErr := st.AssistantReplyByRetrievalToken(tenantID, req.ConversationID, token); lookupErr == nil && existing != nil {
+				slog.Info("save_reply idempotent reuse",
+					"tenant_id", tenantID,
+					"conversation_id", req.ConversationID,
+					"retrieval_token", token,
+					"message_id", existing.ID,
+				)
+				c.JSON(http.StatusOK, existing)
+				return
+			} else if lookupErr != nil && !errors.Is(lookupErr, pgx.ErrNoRows) {
+				slog.Warn("save_reply idempotency lookup failed",
+					"tenant_id", tenantID,
+					"conversation_id", req.ConversationID,
+					"retrieval_token", token,
+					"err", lookupErr,
+				)
+				// Fall through to insert path; dedup is best-effort on this
+				// error path so we never block a legitimate save.
+			}
+			msg, saveErr := st.SaveAssistantReplyWithToken(tenantID, req.AccountID, req.ConversationID, req.CustomerName, req.Content, req.KnowledgeIDs, token)
+			if saveErr != nil {
+				if errors.Is(saveErr, store.ErrDailyReplyLimitReached) {
+					c.JSON(http.StatusTooManyRequests, gin.H{"error": model.ErrorDetail{Code: "DAILY_LIMIT_REACHED", Message: "Daily reply limit reached."}})
+					return
+				}
+				c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to save reply."}})
+				return
+			}
+			c.JSON(http.StatusOK, msg)
+			return
+		}
+
 		msg, err := st.SaveAssistantReply(tenantID, req.AccountID, req.ConversationID, req.CustomerName, req.Content, req.KnowledgeIDs)
 		if err != nil {
 			if errors.Is(err, store.ErrDailyReplyLimitReached) {
@@ -299,12 +410,8 @@ func handleConversationQuery(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "message and conversationId are required."}})
 			return
 		}
-		if req.MaxHistory <= 0 {
-			req.MaxHistory = 10
-		}
-		if req.MaxKnowledge <= 0 {
-			req.MaxKnowledge = 5
-		}
+		req.MaxHistory = clampNonPositive(req.MaxHistory, 10, maxHistoryCap)
+		req.MaxKnowledge = clampNonPositive(req.MaxKnowledge, 5, maxKnowledgeCap)
 		if !validConversationHistory(req.History) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "History contains an invalid message."}})
 			return
@@ -321,8 +428,10 @@ func handleConversationQuery(st *store.Store) gin.HandlerFunc {
 			return
 		}
 
-		// 2. Search knowledge
-		results, err := st.SearchKnowledgeForBases(session.ActiveTenantID, accountKnowledgeBaseIDs(account), req.Message, st.EmbedTexts([]string{req.Message}), req.MaxKnowledge)
+		// 2. Search knowledge. Prefer an explicit SearchQuery (Agent C may
+		//    pre-extract one); otherwise fall back to the raw customer message.
+		searchQuery := effectiveSearchQuery(&req)
+		results, err := st.SearchKnowledgeForBases(session.ActiveTenantID, accountKnowledgeBaseIDs(account), searchQuery, st.EmbedTexts([]string{searchQuery}), req.MaxKnowledge)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to search knowledge."}})
 			return
@@ -394,11 +503,12 @@ func handleConversationQuery(st *store.Store) gin.HandlerFunc {
 
 		// 5. Return full context for OpenClaw
 		c.JSON(http.StatusOK, model.ConversationQueryResponse{
-			SystemPrompt: systemPrompt,
-			Knowledge:    results,
-			History:      history,
-			ReplyTo:      req.ConversationID,
-			DirectReply:  directReply,
+			SystemPrompt:   systemPrompt,
+			Knowledge:      results,
+			History:        history,
+			ReplyTo:        req.ConversationID,
+			DirectReply:    directReply,
+			RetrievalToken: generateRetrievalToken(req.ConversationID, time.Now()),
 		})
 	}
 }
@@ -656,4 +766,108 @@ func isCJK(s string) bool {
 		}
 	}
 	return cjk > len([]rune(s))/2
+}
+
+// embedHealthURL is the URL /health/ready polls to confirm the local
+// embedding service is up. It mirrors the EMBED_URL convention used by
+// internal/embedding (default http://127.0.0.1:8090) but appends /health.
+// The check is best-effort: a non-2xx response or a connection failure makes
+// the readiness probe fail, which is exactly what we want the outer load
+// balancer to see.
+func embedHealthURL() string {
+	u := strings.TrimSpace(os.Getenv("EMBED_URL"))
+	if u == "" {
+		u = "http://127.0.0.1:8090"
+	}
+	return strings.TrimRight(u, "/") + "/health"
+}
+
+// pingEmbedService performs a 2-second HTTP GET against the embed service.
+// Any 2xx status is treated as healthy. The embed service is optional for
+// keyword search, but when configured it must respond so RAG retrieval is
+// not silently degraded.
+func pingEmbedService() error {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(embedHealthURL())
+	if err != nil {
+		return fmt.Errorf("embed unreachable: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("embed health returned %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// pingDatabase confirms the Postgres connection is responsive via an existing
+// lightweight read. We deliberately use TenantByID with a sentinel ID rather
+// than a raw "SELECT 1" because the handler package cannot access Store.pool
+// directly (pg.go is owned by Agent A). ErrNoRows is treated as success: it
+// proves the round-trip completed.
+func pingDatabase(st *store.Store) error {
+	_, err := st.TenantByID("healthcheck-nonexistent")
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	return fmt.Errorf("db unreachable: %w", err)
+}
+
+// MakeReadyHandler returns the composite readiness handler. Each component
+// (database, embed service, OpenClaw) is checked independently; the first
+// failing component short-circuits and returns 503 with a JSON body naming
+// it, so an operator can see at a glance which dependency is degraded. The
+// handler returns 200 only when every component is healthy, which is the
+// condition under which an outer load balancer should keep the pod in
+// rotation.
+//
+// OpenClaw availability uses isOpenClawAvailable (defined in accounts.go in
+// the same package) which simply checks the binary/docker container is
+// reachable via PATH. This intentionally does NOT verify the gateway is
+// actually serving traffic — a deeper check would race with gateway restarts
+// and cause flapping. Lack of the binary means the deployment does not use
+// OpenClaw at all, so we treat that as "not applicable / healthy".
+func MakeReadyHandler(st *store.Store) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		checks := map[string]string{}
+
+		if err := pingDatabase(st); err != nil {
+			checks["database"] = err.Error()
+		} else {
+			checks["database"] = "ok"
+		}
+
+		if err := pingEmbedService(); err != nil {
+			checks["embed"] = err.Error()
+		} else {
+			checks["embed"] = "ok"
+		}
+
+		// isOpenClawAvailable is in accounts.go (same package). When the
+		// OpenClaw binary is not installed the deployment simply does not
+		// integrate with WhatsApp, so absence is reported as "n/a" rather
+		// than failing readiness.
+		if isOpenClawAvailable() {
+			checks["openclaw"] = "ok"
+		} else {
+			checks["openclaw"] = "n/a"
+		}
+
+		healthy := checks["database"] == "ok" && checks["embed"] == "ok"
+		status := http.StatusOK
+		if !healthy {
+			status = http.StatusServiceUnavailable
+			slog.Warn("readiness check failed", "checks", checks)
+		}
+		statusStr := "ok"
+		if !healthy {
+			statusStr = "unhealthy"
+		}
+		c.JSON(status, gin.H{
+			"status": statusStr,
+			"checks": checks,
+		})
+	}
 }
