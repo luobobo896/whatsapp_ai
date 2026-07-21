@@ -12,10 +12,13 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -217,6 +220,48 @@ func openClawConfigPath() (string, error) {
 	return filepath.Join(home, ".openclaw", "openclaw.json"), nil
 }
 
+// writeOpenClawConfigAtomic writes data to path atomically by first writing
+// to a same-directory temp file and renaming. Same-directory rename is atomic
+// on POSIX, so a crash mid-write leaves either the old or the new file, never
+// a truncated or empty openclaw.json. The file is created with 0600 to match
+// the permissions used by the os.WriteFile calls it replaces.
+func writeOpenClawConfigAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".openclaw-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
+}
+
 // ensureOpenClawAccount adds the account to OpenClaw's config so the gateway
 // monitors its auth directory. Safe to call multiple times (idempotent).
 func ensureOpenClawAccount(accountKey string) error {
@@ -250,10 +295,7 @@ func ensureOpenClawAccountAtPath(cfgPath, accountKey string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
-		return err
-	}
-	return os.WriteFile(cfgPath, updated, 0o600)
+	return writeOpenClawConfigAtomic(cfgPath, updated)
 }
 
 func ensureOpenClawAccountConfig(cfg map[string]any, accountKey string) bool {
@@ -341,7 +383,19 @@ func openClawRAGMCPName(accountKey string) string {
 	return "whatsapp-rag-" + accountKey
 }
 
+// openClawRAGAgentID returns the ID of the live OpenClaw agent that actually
+// processes WhatsApp messages for this account. OpenClaw creates this agent
+// automatically after a successful QR scan (id "whatsapp-<accountKey>",
+// workspace "whatsapp-workspaces/<accountKey>"); we wire the RAG MCP, persona
+// and model auth into that agent instead of a second, unused rag agent.
 func openClawRAGAgentID(accountKey string) string {
+	return "whatsapp-" + accountKey
+}
+
+// openClawLegacyRAGAgentID returns the pre-fix agent id ("whatsapp-rag-<key>")
+// used by older deployments. We keep it for back-compat cleanup so configs
+// written before this fix do not leave orphan agents/bindings on delete.
+func openClawLegacyRAGAgentID(accountKey string) string {
 	return "whatsapp-rag-" + accountKey
 }
 
@@ -388,7 +442,7 @@ func ensureOpenClawRAGConfig(cfg map[string]any, accountID, accountKey string, o
 	agentID := openClawRAGAgentID(accountKey)
 	agent := map[string]any{
 		"id":          agentID,
-		"workspace":   filepath.Join(options.Workspace, agentID),
+		"workspace":   filepath.Join(options.Workspace, accountKey),
 		"description": "WhatsApp knowledge-base customer service agent",
 		"sandbox":     map[string]any{"mode": "off"},
 		"tools": map[string]any{
@@ -431,7 +485,11 @@ func ensureOpenClawRAGConfig(cfg map[string]any, accountID, accountKey string, o
 		}
 		match, _ := existing["match"].(map[string]any)
 		if match["channel"] == "whatsapp" && match["accountId"] == accountKey {
-			if existing["agentId"] != agentID || existing["comment"] != binding["comment"] {
+			existingAgentID, _ := existing["agentId"].(string)
+			// Accept bindings pointing at the live wa agent (our target) or the
+			// legacy rag agent (migrated on write). Any other agentId means someone
+			// else owns this WhatsApp account and we must not silently take over.
+			if existingAgentID != agentID && existingAgentID != openClawLegacyRAGAgentID(accountKey) {
 				return fmt.Errorf("WhatsApp 账号 %s 已绑定到其他 OpenClaw Agent", accountKey)
 			}
 			bindings[i] = binding
@@ -547,9 +605,9 @@ func openClawRAGRuntimeDir(hostDir string) string {
 }
 
 func openClawRAGWorkspaceDirs(cfgPath string) (string, string) {
-	hostDir := filepath.Join(filepath.Dir(cfgPath), "whatsapp-rag-workspaces")
+	hostDir := filepath.Join(filepath.Dir(cfgPath), "whatsapp-workspaces")
 	if openClawDockerContainer() != "" {
-		return hostDir, "/home/node/.openclaw/whatsapp-rag-workspaces"
+		return hostDir, "/home/node/.openclaw/whatsapp-workspaces"
 	}
 	return hostDir, hostDir
 }
@@ -643,7 +701,9 @@ func writeOpenClawRAGWorkspace(workspaceDir, accountKey string) error {
 	if err := ensureOpenClawDockerOwnership(workspaceDir); err != nil {
 		return err
 	}
-	agentDir := filepath.Join(workspaceDir, openClawRAGAgentID(accountKey))
+	// OpenClaw uses workspace "whatsapp-workspaces/<accountKey>" for the live
+	// wa agent; AGENTS.md lives at its root, not under a per-agent subdir.
+	agentDir := filepath.Join(workspaceDir, accountKey)
 	if err := os.MkdirAll(agentDir, 0o700); err != nil {
 		return err
 	}
@@ -692,7 +752,15 @@ func ensureOpenClawEnvValue(path, key, value string) (bool, error) {
 	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
 	found := false
 	for i, line := range lines {
-		if strings.HasPrefix(strings.TrimSpace(line), key+"=") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		eq := strings.Index(trimmed, "=")
+		if eq < 0 {
+			continue
+		}
+		if strings.TrimSpace(trimmed[:eq]) == key {
 			lines[i] = entry
 			found = true
 		}
@@ -774,7 +842,7 @@ func ensureOpenClawRAGAccount(accountID, accountKey string) (bool, error) {
 	}
 	changed := tokenChanged
 	if !sameOpenClawConfig(data, updated) {
-		if err := os.WriteFile(cfgPath, updated, 0o600); err != nil {
+		if err := writeOpenClawConfigAtomic(cfgPath, updated); err != nil {
 			return false, err
 		}
 		changed = true
@@ -850,7 +918,7 @@ func updateOpenClawRAGConfigAtPath(cfgPath string, mutate func(map[string]any) b
 	if err != nil {
 		return false, err
 	}
-	if err := os.WriteFile(cfgPath, updated, 0o600); err != nil {
+	if err := writeOpenClawConfigAtomic(cfgPath, updated); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -1076,8 +1144,18 @@ func restartOpenClawGateway() error {
 	defer cancel()
 	command, args := openClawGatewayRestartCommandSpec()
 	output, err := exec.CommandContext(ctx, command, args...).CombinedOutput()
+	message := strings.TrimSpace(string(output))
+	// `openclaw gateway restart` restarts the root user systemd service and
+	// reports success on stdout ("Restarted systemd service: ...") but exits
+	// non-zero (detached restart). Treat that explicit success signal as OK so
+	// startup account sync does not crash the server on every (re)start.
 	if err != nil {
-		message := strings.TrimSpace(string(output))
+		lower := strings.ToLower(message)
+		if strings.Contains(lower, "restarted") || strings.Contains(lower, "started") {
+			slog.Warn("openclaw gateway restart exited non-zero but signalled success", "output", message)
+			invalidateWhatsAppChannelStatuses()
+			return nil
+		}
 		if message == "" {
 			message = err.Error()
 		}
@@ -1265,9 +1343,20 @@ func qrBridgeScriptPath() (string, error) {
 		}
 		if err = file.Close(); err != nil {
 			qrBridgePathErr = err
+			return
 		}
+		// Best-effort cleanup on graceful shutdown so the bridge script does
+		// not pile up across restarts. Hard crashes still leak; acceptable.
+		go cleanupQrBridgeScriptOnExit(qrBridgePath)
 	})
 	return qrBridgePath, qrBridgePathErr
+}
+
+func cleanupQrBridgeScriptOnExit(path string) {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
+	<-ch
+	_ = os.Remove(path)
 }
 
 func startQrSession(accountID, accountKey string) (*qrSession, error) {
@@ -1490,23 +1579,24 @@ func requestAccountDeletion(accountID string) bool {
 	return !alreadyRequested
 }
 
+// openClawLogoutCompletePhrases matches the deterministic phrases OpenClaw
+// emits when a logout is a no-op because the account was never (or is no
+// longer) linked. Matched with word boundaries so substrings like "no auth
+// token configured" (a real auth failure) do not get misclassified as a
+// completed logout. Kept case-insensitive to tolerate OpenClaw wording tweaks.
+var openClawLogoutCompletePhrases = regexp.MustCompile(
+	`(?i)(?:` +
+		`\balready logged out\b|` +
+		`\bnot logged in\b|` +
+		`\bnot linked\b|` +
+		`\bno credentials\b|` +
+		`\baccount not found\b|` +
+		`\bunknown account\b` +
+		`)`,
+)
+
 func openClawLogoutAlreadyComplete(message string) bool {
-	lower := strings.ToLower(message)
-	for _, marker := range []string{
-		"already logged out",
-		"not logged in",
-		"not linked",
-		"no credentials",
-		"no auth",
-		"account not found",
-		"unknown account",
-		"not configured",
-	} {
-		if strings.Contains(lower, marker) {
-			return true
-		}
-	}
-	return false
+	return openClawLogoutCompletePhrases.MatchString(message)
 }
 
 func disconnectOpenClawAccount(accountKey string) error {
@@ -1531,20 +1621,32 @@ func disconnectOpenClawAccount(accountKey string) error {
 func deleteOpenClawAgentState(accountKey string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), openClawAgentDeleteWait)
 	defer cancel()
-	agentID := openClawRAGAgentID(accountKey)
-	output, err := openClawCommand(ctx, "agents", "delete", agentID, "--force", "--json").CombinedOutput()
-	if err == nil {
-		return nil
+	// Delete the live wa agent (which actually receives WhatsApp messages)
+	// and the legacy rag agent (kept around from older deployments). Either
+	// may already be gone; "not found"-style errors are treated as success.
+	for _, agentID := range []string{openClawRAGAgentID(accountKey), openClawLegacyRAGAgentID(accountKey)} {
+		output, err := openClawCommand(ctx, "agents", "delete", agentID, "--force", "--json").CombinedOutput()
+		if err == nil {
+			continue
+		}
+		message := strings.TrimSpace(string(output))
+		lower := strings.ToLower(message)
+		if strings.Contains(lower, "not found") || strings.Contains(lower, "does not exist") || strings.Contains(lower, "unknown agent") {
+			continue
+		}
+		if message == "" {
+			message = err.Error()
+		}
+		return fmt.Errorf("删除 OpenClaw 客服 Agent %s 失败: %s", agentID, message)
 	}
-	message := strings.TrimSpace(string(output))
-	lower := strings.ToLower(message)
-	if strings.Contains(lower, "not found") || strings.Contains(lower, "does not exist") || strings.Contains(lower, "unknown agent") {
-		return nil
+	// Best-effort cleanup of the live agent workspace dir so OpenClaw does
+	// not retain files for an account we no longer manage. Errors are
+	// ignored: a missing or busy directory is not a deletion failure.
+	if cfgPath, err := openClawConfigPath(); err == nil {
+		hostWorkspace, _ := openClawRAGWorkspaceDirs(cfgPath)
+		_ = os.RemoveAll(filepath.Join(hostWorkspace, accountKey))
 	}
-	if message == "" {
-		message = err.Error()
-	}
-	return fmt.Errorf("删除 OpenClaw 客服 Agent 失败: %s", message)
+	return nil
 }
 
 // normalizeWhatsAppTarget accepts the two customer identifiers OpenClaw
@@ -1806,11 +1908,17 @@ func handleQrLogin(st *store.Store) gin.HandlerFunc {
 			starting := &qrSession{AccountID: accountID, AccountKey: acct.AccountKey, Status: "starting"}
 			qrCache[accountID] = starting
 			qrCacheMu.Unlock()
+			// Safety net: if startQrSession panics or installStartedQrSession
+			// replaces our placeholder, clear any leftover "starting" entry so
+			// the account is not stuck forever (the init() cleaner skips
+			// "starting" sessions). No-op once installStartedQrSession swaps in
+			// the started session, since qrCache[accountID] no longer equals
+			// starting.
+			defer clearStartingQrSession(accountID, starting)
 			stopQrSession(previous)
 
 			started, err := startQrSession(accountID, acct.AccountKey)
 			if err != nil {
-				clearStartingQrSession(accountID, starting)
 				return err
 			}
 			if !installStartedQrSession(accountID, starting, started) {
@@ -1896,7 +2004,12 @@ func handleQrStatus(st *store.Store) gin.HandlerFunc {
 			refreshAllWhatsAppChannelStatusesAsync()
 		}
 
-		if resp.Status == "connected" {
+		// Provision MCP tools, persona and model auth only on the first observed
+		// transition into "connected" (DB status not yet persisted). Subsequent
+		// polls must be side-effect-free: no RAG writes, no gateway restart, no
+		// UpdateAccount. Otherwise every UI refresh re-runs openclaw commands and
+		// rewrites the DB row even when nothing changed.
+		if resp.Status == "connected" && acct.Status != "connected" {
 			activationErr := runQrActivation(accountID, func() error {
 				if !hasSession {
 					if acct.AccountKey != "" {
@@ -2058,6 +2171,7 @@ func executeAccountDeletion(st *store.Store, tenantID string, acct *model.Accoun
 		return fmt.Errorf("删除客服账号失败: %w", err)
 	}
 	invalidateWhatsAppChannelStatuses()
+	cancelAccountDeletion(acct.ID)
 	return nil
 }
 

@@ -3,10 +3,12 @@ package store
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"sort"
 	"strings"
@@ -164,6 +166,8 @@ func (s *Store) migrate(ctx context.Context) error {
 		`ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS account_id TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS idx_conv_msg_account ON conversation_messages(tenant_id, account_id, created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_conv_msg_daily_reply ON conversation_messages(tenant_id, account_id, created_at) WHERE role='assistant'`,
+		`ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS message_id TEXT`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_conv_msg_dedup ON conversation_messages(tenant_id, conversation_id, message_id) WHERE message_id IS NOT NULL`,
 	}
 	for _, statement := range migrations {
 		if _, err := s.pool.Exec(ctx, statement); err != nil {
@@ -791,14 +795,23 @@ func (s *Store) searchKnowledge(tenantID string, baseIDs []string, query string,
 	if len(embedding) > 0 {
 		vectorArgs := []any{tenantID}
 		baseFilter := ""
+		argIdx := 2
 		if len(baseIDs) > 0 {
-			baseFilter = " AND k.id = ANY($2)"
+			baseFilter = fmt.Sprintf(" AND k.id = ANY($%d)", argIdx)
 			vectorArgs = append(vectorArgs, baseIDs)
+			argIdx++
 		}
+		// Cap the candidate set so we do not pull every chunk+embedding for the
+		// tenant into Go heap. For very large corpora a server-side ANN/pgvector
+		// index would be the right long-term fix.
+		const vectorCandidateLimit = 500
+		vectorArgs = append(vectorArgs, vectorCandidateLimit)
+		limitArgIdx := argIdx
 		rows, err := s.pool.Query(context.Background(),
-			"SELECT a.id, a.title, a.content, a.category, a.attributes, k.name AS kb_name, c.id, c.embedding FROM knowledge_chunks c JOIN knowledge_articles a ON c.article_id = a.id JOIN knowledge_bases k ON a.knowledge_base_id = k.id WHERE k.tenant_id=$1 AND a.status='active' AND k.status='active' AND c.embedding IS NOT NULL"+baseFilter, vectorArgs...)
-		if err == nil {
-			defer rows.Close()
+			"SELECT a.id, a.title, a.content, a.category, a.attributes, k.name AS kb_name, c.id, c.embedding FROM knowledge_chunks c JOIN knowledge_articles a ON c.article_id = a.id JOIN knowledge_bases k ON a.knowledge_base_id = k.id WHERE k.tenant_id=$1 AND a.status='active' AND k.status='active' AND c.embedding IS NOT NULL"+baseFilter+fmt.Sprintf(" LIMIT $%d", limitArgIdx), vectorArgs...)
+		if err != nil {
+			slog.Warn("knowledge vector query failed; falling back to ILIKE", "tenant_id", tenantID, "err", err)
+		} else {
 			type row struct {
 				artID, title, content, category, attrs, kbName, chunkID, emb string
 			}
@@ -806,11 +819,20 @@ func (s *Store) searchKnowledge(tenantID string, baseIDs []string, query string,
 			for rows.Next() {
 				var r row
 				if err := rows.Scan(&r.artID, &r.title, &r.content, &r.category, &r.attrs, &r.kbName, &r.chunkID, &r.emb); err != nil {
+					slog.Warn("knowledge vector row scan failed; skipping chunk", "err", err)
 					continue
 				}
 				chunks = append(chunks, r)
 			}
 			rows.Close()
+			queryVec := make([]float64, len(embedding))
+			for i, v := range embedding {
+				queryVec[i] = float64(v)
+			}
+			// Drop near-zero matches; cosine similarity below this threshold is
+			// treated as "no relevant knowledge" so the caller falls back to ILIKE
+			// or the canned "I don't know" reply instead of surfacing noise.
+			const minVectorScore = 0.2
 			type scored struct {
 				item  model.SearchResultItem
 				score float64
@@ -818,19 +840,23 @@ func (s *Store) searchKnowledge(tenantID string, baseIDs []string, query string,
 			var results []scored
 			for _, ck := range chunks {
 				var embVec []float64
-				if json.Unmarshal([]byte(ck.emb), &embVec) == nil && len(embVec) > 0 {
-					queryVec := make([]float64, len(embedding))
-					for i_, v := range embedding {
-						queryVec[i_] = float64(v)
-					}
-					sim := cosineSimilarity(queryVec, embVec)
-					results = append(results, scored{
-						item:  model.SearchResultItem{ID: ck.artID, Title: ck.title, Content: ck.content, Category: ck.category, Attributes: ck.attrs, KnowledgeBaseName: ck.kbName, Score: sim},
-						score: sim,
-					})
+				if json.Unmarshal([]byte(ck.emb), &embVec) != nil || len(embVec) == 0 {
+					continue
 				}
+				if len(embVec) != len(queryVec) {
+					slog.Warn("embedding dimension mismatch; skipping chunk", "chunk_id", ck.chunkID, "want", len(queryVec), "got", len(embVec))
+					continue
+				}
+				sim := cosineSimilarity(queryVec, embVec)
+				if sim < minVectorScore {
+					continue
+				}
+				results = append(results, scored{
+					item:  model.SearchResultItem{ID: ck.artID, Title: ck.title, Content: ck.content, Category: ck.category, Attributes: ck.attrs, KnowledgeBaseName: ck.kbName, Score: sim},
+					score: sim,
+				})
 			}
-			sort.Slice(results, func(i_, j_ int) bool { return results[i_].score > results[j_].score })
+			sort.Slice(results, func(i, j int) bool { return results[i].score > results[j].score })
 			seen := map[string]bool{}
 			var list []model.SearchResultItem
 			for _, s := range results {
@@ -869,7 +895,7 @@ func (s *Store) searchKnowledge(tenantID string, baseIDs []string, query string,
 		p := fmt.Sprintf("$%d", argIdx)
 		argIdx++
 		scoreParts[i] = fmt.Sprintf("(CASE WHEN a.title ILIKE '%%%%' || %s || '%%%%' THEN 3 WHEN a.content ILIKE '%%%%' || %s || '%%%%' THEN 2 WHEN a.category ILIKE '%%%%' || %s || '%%%%' THEN 2 WHEN a.attributes ILIKE '%%%%' || %s || '%%%%' THEN 1 ELSE 0 END)", p, p, p, p)
-		args = append(args, w)
+		args = append(args, escapeILIKEPattern(w))
 	}
 	minimumScore := 2
 	if len(words) > 1 {
@@ -896,15 +922,54 @@ func (s *Store) searchKnowledge(tenantID string, baseIDs []string, query string,
 	return list, rows.Err()
 }
 
+// maxArticleRunes caps the amount of content chunkArticleTx will process in
+// a single transaction. Articles larger than this are truncated so one big
+// article cannot hold a long-open transaction with thousands of chunk INSERTs.
+const maxArticleRunes = 50000
+
 func chunkArticleTx(ctx context.Context, tx pgx.Tx, articleID, content string) error {
+	// Bound per-article work; callers that need full indexing for larger docs
+	// should split the input themselves.
+	if r := []rune(content); len(r) > maxArticleRunes {
+		content = string(r[:maxArticleRunes])
+	}
+	chunks := splitContent(content, 500)
+	// Preserve embeddings of unchanged chunks (keyed by exact content) so that
+	// editing title/category (or minor content tweaks) does not zero out the
+	// article's vector index and silently take it out of retrieval until the
+	// background embedder catches up.
+	existingRows, err := tx.Query(ctx,
+		"SELECT content, embedding FROM knowledge_chunks WHERE article_id=$1", articleID)
+	if err != nil {
+		return err
+	}
+	preservedEmbeddings := map[string]string{}
+	for existingRows.Next() {
+		var c string
+		var emb *string
+		if err := existingRows.Scan(&c, &emb); err != nil {
+			existingRows.Close()
+			return err
+		}
+		if emb != nil && *emb != "" {
+			preservedEmbeddings[c] = *emb
+		}
+	}
+	existingRows.Close()
+	if err := existingRows.Err(); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, "DELETE FROM knowledge_chunks WHERE article_id=$1", articleID); err != nil {
 		return err
 	}
-	chunks := splitContent(content, 500)
 	for i, c := range chunks {
+		var emb any
+		if v, ok := preservedEmbeddings[c]; ok {
+			emb = v
+		}
 		if _, err := tx.Exec(ctx,
-			"INSERT INTO knowledge_chunks (id,article_id,content,chunk_index) VALUES ($1,$2,$3,$4)",
-			genID(), articleID, c, i); err != nil {
+			"INSERT INTO knowledge_chunks (id,article_id,content,chunk_index,embedding) VALUES ($1,$2,$3,$4,$5)",
+			genID(), articleID, c, i, emb); err != nil {
 			return err
 		}
 	}
@@ -1030,14 +1095,29 @@ func (s *Store) SaveAssistantReply(tenantID, accountID, conversationID, customer
 	return s.saveAssistantReply(tenantID, accountID, conversationID, customerName, content, knowledgeIDs, nil)
 }
 
-// DeliverAndSaveAssistantReply holds the account quota lock while delivering
-// an external reply, then records that reply in the same transaction.
+// DeliverAndSaveAssistantReply reserves daily quota and persists the reply in
+// a short transaction, then invokes deliver() to send the WhatsApp message
+// AFTER the transaction commits. If deliver fails, the reserved row is deleted
+// so the daily-limit counter stays accurate. Signature is preserved so the
+// handler call site is unchanged.
 func (s *Store) DeliverAndSaveAssistantReply(tenantID, accountID, conversationID, customerName, content, knowledgeIDs string, deliver func() error) (*model.ConversationMessage, error) {
 	return s.saveAssistantReply(tenantID, accountID, conversationID, customerName, content, knowledgeIDs, deliver)
 }
 
-// saveAssistantReply saves a reply only if the account has remaining daily
-// capacity. The account row lock serializes attempts for the same account.
+// saveAssistantReply atomically reserves daily quota and persists the reply,
+// then optionally delivers it OUTSIDE the database transaction. Running
+// deliver() after commit is required: the previous implementation invoked
+// deliver() between the account lock and INSERT/commit, so a commit failure
+// after a successful WhatsApp send produced duplicate sends plus an
+// off-by-N daily limit counter.
+//
+// Sequence:
+//  1. tx A (short, account row lock): SELECT daily_limit + COUNT today + INSERT message + commit.
+//     The committed message is what subsequent callers count against the limit.
+//  2. deliver() runs with no DB lock held.
+//  3. On deliver failure, delete the reserved row to release the quota. If the
+//     delete also fails the quota stays consumed (fail-closed for rate limit,
+//     still no duplicate WhatsApp send).
 func (s *Store) saveAssistantReply(tenantID, accountID, conversationID, customerName, content, knowledgeIDs string, deliver func() error) (*model.ConversationMessage, error) {
 	ctx := context.Background()
 	tx, err := s.pool.Begin(ctx)
@@ -1062,11 +1142,6 @@ func (s *Store) saveAssistantReply(tenantID, accountID, conversationID, customer
 			return nil, ErrDailyReplyLimitReached
 		}
 	}
-	if deliver != nil {
-		if err := deliver(); err != nil {
-			return nil, err
-		}
-	}
 
 	m := &model.ConversationMessage{
 		ID: genID(), ConversationID: conversationID, CustomerName: customerName,
@@ -1081,30 +1156,63 @@ func (s *Store) saveAssistantReply(tenantID, accountID, conversationID, customer
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
+
+	if deliver != nil {
+		if derr := deliver(); derr != nil {
+			if delErr := s.deleteMessageByID(ctx, m.ID); delErr != nil {
+				slog.Warn("failed to release undelivered assistant reply quota",
+					"message_id", m.ID, "tenant_id", tenantID, "account_id", accountID, "err", delErr)
+			}
+			return nil, derr
+		}
+	}
 	return m, nil
 }
 
-// SaveMessageIfAbsent saves a message only when an identical one (same conversation,
-// role, and content) does not already exist. Used to persist OpenClaw-provided
-// history without creating duplicates on repeated calls.
+// deleteMessageByID removes a conversation_messages row by primary key. Used by
+// saveAssistantReply to release the daily-quota slot reserved for an assistant
+// reply whose out-of-transaction delivery failed.
+func (s *Store) deleteMessageByID(ctx context.Context, id string) error {
+	_, err := s.pool.Exec(ctx, "DELETE FROM conversation_messages WHERE id=$1", id)
+	return err
+}
+
+// SaveMessageIfAbsent saves a message idempotently. The previous SELECT-then-
+// INSERT had a TOCTOU race and the trailing ON CONFLICT DO NOTHING never matched
+// because the table had no unique constraint to conflict on. We now derive a
+// deterministic message_id from (role, content) and rely on the partial unique
+// index idx_conv_msg_dedup to collapse concurrent/retried calls atomically.
+//
+// Trade-off: identical (role, content) within the same conversation collapse to
+// one row, so legitimate back-to-back duplicate customer messages are deduped
+// too. A future API can take an explicit external idempotency key to lift this
+// restriction; the index already supports it via the message_id column.
 func (s *Store) SaveMessageIfAbsent(tenantID, accountID, conversationID, customerName, role, content, knowledgeIDs string) error {
-	// Check existence first to avoid the INSERT overhead on the hot path.
-	var exists bool
-	if err := s.pool.QueryRow(context.Background(),
-		"SELECT EXISTS(SELECT 1 FROM conversation_messages WHERE tenant_id=$1 AND account_id=$2 AND conversation_id=$3 AND role=$4 AND content=$5)",
-		tenantID, accountID, conversationID, role, content,
-	).Scan(&exists); err != nil {
-		return err
-	}
-	if exists {
-		return nil
-	}
-	id := genID()
+	messageID := dedupMessageID(role, content)
 	_, err := s.pool.Exec(context.Background(),
-		"INSERT INTO conversation_messages (id,tenant_id,account_id,conversation_id,customer_name,role,content,knowledge_ids) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING",
-		id, tenantID, accountID, conversationID, customerName, role, content, knowledgeIDs,
+		"INSERT INTO conversation_messages (id,tenant_id,account_id,conversation_id,customer_name,role,content,knowledge_ids,message_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (tenant_id, conversation_id, message_id) WHERE message_id IS NOT NULL DO NOTHING",
+		genID(), tenantID, accountID, conversationID, customerName, role, content, knowledgeIDs, messageID,
 	)
 	return err
+}
+
+// dedupMessageID derives a deterministic idempotency key for SaveMessageIfAbsent
+// from role+content. It is deliberately content-derived so retries of the exact
+// same request collapse; callers with a true external idempotency key should
+// populate message_id directly in a future API extension.
+func dedupMessageID(role, content string) string {
+	h := sha256.Sum256([]byte(role + "\x00" + content))
+	return hex.EncodeToString(h[:16])
+}
+
+// escapeILIKEPattern escapes user-supplied text so % and _ are treated as
+// literals when concatenated into an ILIKE pattern. Backslash is the default
+// ESCAPE character in PostgreSQL's ILIKE, so it must be escaped first.
+func escapeILIKEPattern(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "%", "\\%")
+	s = strings.ReplaceAll(s, "_", "\\_")
+	return s
 }
 
 func (s *Store) LoadHistory(tenantID, accountID, conversationID string, limit int) ([]model.ConversationMessage, error) {
@@ -1112,7 +1220,7 @@ func (s *Store) LoadHistory(tenantID, accountID, conversationID string, limit in
 		limit = 20
 	}
 	rows, err := s.pool.Query(context.Background(),
-		"SELECT id,conversation_id,account_id,customer_name,role,content,knowledge_ids,to_char(created_at, 'YYYY-MM-DD HH24:MI:SS') FROM conversation_messages WHERE tenant_id=$1 AND account_id=$2 AND conversation_id=$3 ORDER BY created_at DESC LIMIT $4",
+		"SELECT id,conversation_id,account_id,customer_name,role,content,knowledge_ids,to_char(created_at, 'YYYY-MM-DD HH24:MI:SS') FROM conversation_messages WHERE tenant_id=$1 AND account_id=$2 AND conversation_id=$3 ORDER BY created_at DESC, id LIMIT $4",
 		tenantID, accountID, conversationID, limit)
 	if err != nil {
 		return nil, err
@@ -1132,14 +1240,28 @@ func (s *Store) LoadHistory(tenantID, accountID, conversationID string, limit in
 	return list, rows.Err()
 }
 
-func (s *Store) ListConversationSummaries(tenantID, accountID string) ([]model.ConversationSummary, error) {
+// ListConversationSummaries returns a page of conversation summaries. limit is
+// clamped by the caller (handler) to a sane max; offset is 0-based. Without the
+// LIMIT the previous implementation streamed the whole tenant's conversations,
+// which degraded as data accumulated.
+func (s *Store) ListConversationSummaries(tenantID, accountID string, limit, offset int) ([]model.ConversationSummary, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	q := `SELECT cm.conversation_id, (SELECT customer_name FROM conversation_messages cm4 WHERE cm4.tenant_id=$1 AND cm4.account_id=cm.account_id AND cm4.conversation_id=cm.conversation_id ORDER BY created_at DESC LIMIT 1) AS customer_name, cm.account_id, (SELECT content FROM conversation_messages cm2 WHERE cm2.tenant_id=$1 AND cm2.account_id=cm.account_id AND cm2.conversation_id=cm.conversation_id ORDER BY created_at DESC LIMIT 1) AS last_message, (SELECT to_char(created_at, 'YYYY-MM-DD HH24:MI:SS') FROM conversation_messages cm3 WHERE cm3.tenant_id=$1 AND cm3.account_id=cm.account_id AND cm3.conversation_id=cm.conversation_id ORDER BY created_at DESC LIMIT 1) AS last_message_at, COUNT(*) AS message_count FROM conversation_messages cm WHERE tenant_id=$1`
 	args := []any{tenantID}
+	limitArg := 2
 	if accountID != "" {
 		q += ` AND cm.account_id=$2`
 		args = append(args, accountID)
+		limitArg = 3
 	}
-	q += ` GROUP BY cm.conversation_id, cm.account_id ORDER BY last_message_at DESC`
+	offsetArg := limitArg + 1
+	args = append(args, limit, offset)
+	q += fmt.Sprintf(` GROUP BY cm.conversation_id, cm.account_id ORDER BY last_message_at DESC, cm.conversation_id LIMIT $%d OFFSET $%d`, limitArg, offsetArg)
 	rows, err := s.pool.Query(context.Background(), q, args...)
 	if err != nil {
 		return nil, err
@@ -1292,13 +1414,32 @@ func (s *Store) CreateArticle(kbID, title, content, category, attributes string)
 	return a, nil
 }
 
-// CreateArticles imports a fully validated batch in one transaction so a
-// malformed database write cannot leave users with a partial import.
+// CreateArticles imports a fully validated batch in sub-batches of 50 articles
+// per transaction. The previous version held a single transaction open for the
+// whole import (N articles × M chunk INSERTs each), which on large uploads
+// produced long-running transactions that bloated WAL, held row locks, and
+// degraded replication. Trade-off: a mid-batch failure now leaves the prior
+// sub-batch committed; callers that need all-or-nothing semantics should
+// validate before calling.
 func (s *Store) CreateArticles(kbID string, articles []model.CreateArticleRequest) error {
 	if len(articles) == 0 {
 		return nil
 	}
+	const batchSize = 50
 	ctx := context.Background()
+	for start := 0; start < len(articles); start += batchSize {
+		end := start + batchSize
+		if end > len(articles) {
+			end = len(articles)
+		}
+		if err := s.createArticlesBatch(ctx, kbID, articles[start:end]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) createArticlesBatch(ctx context.Context, kbID string, articles []model.CreateArticleRequest) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err

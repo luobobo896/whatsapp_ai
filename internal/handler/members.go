@@ -129,6 +129,18 @@ func handleAcceptInvitation(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusNotFound, gin.H{"error": model.ErrorDetail{Code: "NOT_FOUND", Message: "邀请不存在或已过期。"}})
 			return
 		}
+		// Reject acceptance if the tenant has been suspended or otherwise made
+		// inactive since the invitation was issued. Invitation expiry alone is
+		// not enough: a tenant can be suspended while invitations remain valid.
+		tenant, err := st.TenantByID(inv.TenantID)
+		if err != nil {
+			c.JSON(http.StatusForbidden, gin.H{"error": model.ErrorDetail{Code: "FORBIDDEN", Message: "租户不可用。"}})
+			return
+		}
+		if tenant.Status != "active" {
+			c.JSON(http.StatusForbidden, gin.H{"error": model.ErrorDetail{Code: "TENANT_SUSPENDED", Message: "租户已被停用。"}})
+			return
+		}
 		var req model.AcceptInvitationRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Invalid request."}})
@@ -152,12 +164,12 @@ func handleAcceptInvitation(st *store.Store) gin.HandlerFunc {
 				c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "密码至少 12 个字符。"}})
 				return
 			}
-			hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+			hash, err := HashPassword(req.Password)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to create user."}})
 				return
 			}
-			user, err = st.CreateUser(req.Email, req.DisplayName, string(hash), "")
+			user, err = st.CreateUser(req.Email, req.DisplayName, hash, "")
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to create user."}})
 				return

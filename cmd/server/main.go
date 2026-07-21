@@ -15,7 +15,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
-	"golang.org/x/crypto/bcrypt"
 
 	"whatsapp-ai-poc/internal/handler"
 	"whatsapp-ai-poc/internal/middleware"
@@ -63,10 +62,12 @@ func run() error {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
-	// Auth routes: login is public, rest require auth
+	// Auth routes: login is public (registered before the .Use chain so it
+	// is exempt from Auth/CSRF); logout and select-tenant are mutating POSTs
+	// behind an authenticated session and therefore require CSRF as well.
 	authGroup := router.Group("/api/auth")
 	authGroup.POST("/login", handler.HandleLogin(st))
-	authGroup.Use(middleware.Auth(st))
+	authGroup.Use(middleware.Auth(st), middleware.RequireCSRF())
 	{
 		authGroup.POST("/logout", handler.HandleLogout(st))
 		authGroup.GET("/me", handler.HandleMe(st))
@@ -170,11 +171,11 @@ func seedPlatformAdmin(st *store.Store) error {
 		return fmt.Errorf("seed platform admin: %w", err)
 	}
 
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	hash, err := handler.HashPassword(password)
 	if err != nil {
 		return err
 	}
-	_, err = st.CreateUser(email, "平台管理员", string(hash), "platform_admin")
+	_, err = st.CreateUser(email, "平台管理员", hash, "platform_admin")
 	if err != nil {
 		return err
 	}

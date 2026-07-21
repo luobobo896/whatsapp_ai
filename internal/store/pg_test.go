@@ -85,3 +85,48 @@ func TestDailyReplyLimitReached(t *testing.T) {
 		})
 	}
 }
+
+func TestDedupMessageIDIsDeterministicAndRoleScoped(t *testing.T) {
+	// Same inputs must produce the same key so retries collapse atomically.
+	a := dedupMessageID("customer", "hi")
+	b := dedupMessageID("customer", "hi")
+	if a != b {
+		t.Fatalf("dedupMessageID not deterministic: %q vs %q", a, b)
+	}
+	// Different role or content must produce different keys so legitimate
+	// distinct messages are not collapsed together.
+	if dedupMessageID("customer", "hi") == dedupMessageID("assistant", "hi") {
+		t.Fatal("dedupMessageID should differ when role differs")
+	}
+	if dedupMessageID("customer", "hi") == dedupMessageID("customer", "hello") {
+		t.Fatal("dedupMessageID should differ when content differs")
+	}
+	// Output is hex-encoded (no NUL/control bytes) so it is safe to store and
+	// matches against the partial unique index predicate.
+	for _, r := range a {
+		if r < 0x20 || r > 0x7e {
+			t.Fatalf("dedupMessageID contains non-printable byte: %q", a)
+		}
+	}
+}
+
+func TestEscapeILIKEPattern(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "plain text unchanged", in: "hello", want: "hello"},
+		{name: "percent escaped", in: "50%", want: `50\%`},
+		{name: "underscore escaped", in: "user_id", want: `user\_id`},
+		{name: "backslash doubled", in: `a\b`, want: `a\\b`},
+		{name: "all wildcards together", in: `%_\`, want: `\%\_\\`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := escapeILIKEPattern(tt.in); got != tt.want {
+				t.Fatalf("escapeILIKEPattern(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}

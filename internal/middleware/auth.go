@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"crypto/subtle"
 	"net/http"
 	"os"
 	"strings"
@@ -78,7 +79,10 @@ func RequireCSRF() gin.HandlerFunc {
 			return
 		}
 		token := c.GetHeader("X-CSRF-Token")
-		if token == "" || token != session.CSRFToken {
+		// Use constant-time comparison so the CSRF token cannot be probed via
+		// response timing. An empty presented token cannot match a real
+		// session CSRF token, so the empty check is folded in.
+		if subtle.ConstantTimeCompare([]byte(token), []byte(session.CSRFToken)) != 1 {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": model.ErrorDetail{Code: "FORBIDDEN", Message: "Invalid CSRF token."}})
 			return
 		}
@@ -153,7 +157,15 @@ func InternalAuth(store *store.Store) gin.HandlerFunc {
 		}
 
 		auth := c.GetHeader("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") || strings.TrimPrefix(auth, "Bearer ") != expectedToken {
+		const bearerPrefix = "Bearer "
+		presentedToken := strings.TrimPrefix(auth, bearerPrefix)
+		// Evaluate both the scheme check and the secret compare unconditionally
+		// so the missing-token and wrong-token paths take similar time. The
+		// secret comparison uses subtle.ConstantTimeCompare to avoid
+		// byte-by-byte timing leakage against the internal API token.
+		hasBearer := strings.HasPrefix(auth, bearerPrefix)
+		tokenMatch := subtle.ConstantTimeCompare([]byte(presentedToken), []byte(expectedToken)) == 1
+		if !hasBearer || !tokenMatch {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": model.ErrorDetail{Code: "AUTH_REQUIRED", Message: "Invalid internal token."}})
 			return
 		}

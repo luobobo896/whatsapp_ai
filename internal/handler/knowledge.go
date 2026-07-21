@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
@@ -50,6 +51,18 @@ const (
 	maxKnowledgeImportFiles    = 20
 	maxKnowledgeImportArticles = 500
 	maxKnowledgeImportBytes    = 5 << 20
+
+	// maxJSONRequestBytes caps JSON request bodies on knowledge endpoints so a
+	// huge payload cannot exhaust server memory before ShouldBindJSON parses.
+	maxJSONRequestBytes = 1 << 20 // 1MB
+	// maxArticleContentRunes bounds article content length; matches the chunk
+	// slicing budget in the store so validated input always fits downstream.
+	maxArticleContentRunes = 50000
+	// maxSearchLimit caps how many results a single search request can return.
+	maxSearchLimit = 50
+	// maxImportMemoryBytes buffers only the first chunk of each upload in RAM;
+	// larger uploads spill to disk temp files instead of 100MB in-process.
+	maxImportMemoryBytes = 1 << 20 // 1MB
 )
 
 func handleImportArticles(st *store.Store) gin.HandlerFunc {
@@ -66,7 +79,7 @@ func handleImportArticles(st *store.Store) gin.HandlerFunc {
 		}
 
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxKnowledgeImportBytes*maxKnowledgeImportFiles)
-		if err := c.Request.ParseMultipartForm(maxKnowledgeImportBytes * maxKnowledgeImportFiles); err != nil {
+		if err := c.Request.ParseMultipartForm(maxImportMemoryBytes); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "无法读取导入文件。"}})
 			return
 		}
@@ -268,6 +281,7 @@ func handleCreateBase(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "TENANT_REQUIRED", Message: "No tenant selected."}})
 			return
 		}
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxJSONRequestBytes)
 		var req model.CreateKnowledgeRequest
 		if err := c.ShouldBindJSON(&req); err != nil || req.Name == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Knowledge name is required."}})
@@ -305,6 +319,7 @@ func handleUpdateBase(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "TENANT_REQUIRED", Message: "No tenant selected."}})
 			return
 		}
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxJSONRequestBytes)
 		var req model.UpdateKnowledgeRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Invalid request."}})
@@ -379,9 +394,14 @@ func handleCreateArticle(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusNotFound, gin.H{"error": model.ErrorDetail{Code: "NOT_FOUND", Message: "Knowledge base not found."}})
 			return
 		}
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxJSONRequestBytes)
 		var req model.CreateArticleRequest
 		if err := c.ShouldBindJSON(&req); err != nil || req.Title == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Title is required."}})
+			return
+		}
+		if utf8.RuneCountInString(req.Content) > maxArticleContentRunes {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: fmt.Sprintf("正文不能超过 %d 个字符。", maxArticleContentRunes)}})
 			return
 		}
 		article, err := st.CreateArticle(c.Param("id"), req.Title, req.Content, req.Category, req.Attributes)
@@ -405,6 +425,7 @@ func handleUpdateArticle(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusNotFound, gin.H{"error": model.ErrorDetail{Code: "NOT_FOUND", Message: "Knowledge base not found."}})
 			return
 		}
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxJSONRequestBytes)
 		var req model.UpdateArticleRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Invalid request."}})
@@ -412,6 +433,10 @@ func handleUpdateArticle(st *store.Store) gin.HandlerFunc {
 		}
 		if req.Title == nil && req.Content == nil && req.Category == nil && req.Attributes == nil && req.Status == nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "At least one field is required."}})
+			return
+		}
+		if req.Content != nil && utf8.RuneCountInString(*req.Content) > maxArticleContentRunes {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: fmt.Sprintf("正文不能超过 %d 个字符。", maxArticleContentRunes)}})
 			return
 		}
 		if req.Status != nil && *req.Status != "active" && *req.Status != "inactive" {
@@ -458,6 +483,7 @@ func handleSearchKnowledge(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "TENANT_REQUIRED", Message: "No tenant selected."}})
 			return
 		}
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxJSONRequestBytes)
 		var req model.SearchRequest
 		if err := c.ShouldBindJSON(&req); err != nil || req.Query == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Query is required."}})
@@ -465,6 +491,9 @@ func handleSearchKnowledge(st *store.Store) gin.HandlerFunc {
 		}
 		if req.Limit <= 0 {
 			req.Limit = 5
+		}
+		if req.Limit > maxSearchLimit {
+			req.Limit = maxSearchLimit
 		}
 		results, err := st.SearchKnowledge(session.ActiveTenantID, req.Query, req.Embedding, req.Limit)
 		if err != nil {

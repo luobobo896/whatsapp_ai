@@ -459,9 +459,13 @@ func TestEnsureOpenClawRAGConfigCreatesIsolatedMCPAndRoutePerAccount(t *testing.
 		if tools["profile"] != "messaging" {
 			t.Fatalf("agent tool profile = %#v, want messaging", tools)
 		}
+		// The live agent id is "whatsapp-<key>"; the tools.allow entry uses the
+		// MCP server name "whatsapp-rag-<key>". They differ by design.
+		accountKey := strings.TrimPrefix(agent["id"].(string), "whatsapp-")
+		mcpName := openClawRAGMCPName(accountKey)
 		wantAllow := []string{
-			agent["id"].(string) + "__search_knowledge",
-			agent["id"].(string) + "__save_reply",
+			mcpName + "__search_knowledge",
+			mcpName + "__save_reply",
 		}
 		if allow := tools["allow"].([]string); !slices.Equal(allow, wantAllow) {
 			t.Fatalf("agent tool allowlist = %#v, want %#v", allow, wantAllow)
@@ -587,7 +591,9 @@ func TestPrepareOpenClawRAGTokenStoresSecretOutsideConfig(t *testing.T) {
 
 func TestWriteOpenClawRAGWorkspaceAddsPolicyToExistingWorkspace(t *testing.T) {
 	workspace := t.TempDir()
-	agentDir := filepath.Join(workspace, openClawRAGAgentID("wa_support"))
+	// writeOpenClawRAGWorkspace writes AGENTS.md at the workspace root keyed
+	// by accountKey (matches the live wa agent workspace layout).
+	agentDir := filepath.Join(workspace, "wa_support")
 	if err := os.MkdirAll(agentDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -625,7 +631,9 @@ func TestWriteOpenClawRAGWorkspaceAddsPolicyToExistingWorkspace(t *testing.T) {
 
 func TestWriteOpenClawRAGWorkspaceRemovesLegacyDuplicatePolicy(t *testing.T) {
 	workspace := t.TempDir()
-	agentDir := filepath.Join(workspace, openClawRAGAgentID("wa_support"))
+	// writeOpenClawRAGWorkspace writes AGENTS.md at the workspace root keyed
+	// by accountKey (matches the live wa agent workspace layout).
+	agentDir := filepath.Join(workspace, "wa_support")
 	if err := os.MkdirAll(agentDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -692,7 +700,7 @@ func TestValidateOpenClawRAGAgentModelAuthUsesAgentStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "models status --agent whatsapp-rag-wa_support --check --plain"
+	want := "models status --agent whatsapp-wa_support --check --plain"
 	if string(args) != want {
 		t.Fatalf("model auth command = %q, want %q", args, want)
 	}

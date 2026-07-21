@@ -13,6 +13,23 @@ import (
 	"whatsapp-ai-poc/internal/store"
 )
 
+// bcryptCost controls the cost for newly-generated password hashes. It is
+// intentionally higher than bcrypt.DefaultCost (10) to slow offline brute
+// force. Existing stored hashes remain verifiable regardless of their own
+// cost because bcrypt hashes are self-describing.
+const bcryptCost = 12
+
+// HashPassword generates a bcrypt hash at the package-configured cost. It is
+// the single entry point for new password hashing so the cost cannot drift
+// between the seed, accept-invitation, and create-tenant call sites.
+func HashPassword(password string) (string, error) {
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
+	if err != nil {
+		return "", err
+	}
+	return string(hash), nil
+}
+
 func HandleLogin(st *store.Store) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req model.LoginRequest

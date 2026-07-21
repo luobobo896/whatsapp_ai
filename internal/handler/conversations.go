@@ -154,8 +154,10 @@ func handleInternalConversationQuery(st *store.Store) gin.HandlerFunc {
 			return
 		}
 
-		// 1. Save customer message
-		if _, err := st.SaveMessage(tenantID, req.AccountID, req.ConversationID, req.CustomerName, "customer", req.Message, "[]"); err != nil {
+		// 1. Save customer message (idempotent on retries: same role+content in
+		//    this conversation collapses to one row via SaveMessageIfAbsent's
+		//    partial unique index. Previously a 5xx on later steps doubled it.)
+		if err := st.SaveMessageIfAbsent(tenantID, req.AccountID, req.ConversationID, req.CustomerName, "customer", req.Message, "[]"); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to save message."}})
 			return
 		}
@@ -254,7 +256,29 @@ func handleListConversations(st *store.Store) gin.HandlerFunc {
 			return
 		}
 		accountID := c.Query("accountId")
-		summaries, err := st.ListConversationSummaries(session.ActiveTenantID, accountID)
+		// Page size caps prevent unbounded result sets. Default 50, max 100;
+		// offset is non-negative. Unknown / non-integer values fall back to
+		// defaults instead of erroring so existing UI callers keep working.
+		const (
+			defaultLimit = 50
+			maxLimit     = 100
+		)
+		limit := defaultLimit
+		if l := c.Query("limit"); l != "" {
+			if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
+				limit = parsed
+			}
+		}
+		if limit > maxLimit {
+			limit = maxLimit
+		}
+		offset := 0
+		if o := c.Query("offset"); o != "" {
+			if parsed, err := strconv.Atoi(o); err == nil && parsed >= 0 {
+				offset = parsed
+			}
+		}
+		summaries, err := st.ListConversationSummaries(session.ActiveTenantID, accountID, limit, offset)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to load conversations."}})
 			return
@@ -291,8 +315,8 @@ func handleConversationQuery(st *store.Store) gin.HandlerFunc {
 			return
 		}
 
-		// 1. Save customer message
-		if _, err := st.SaveMessage(session.ActiveTenantID, req.AccountID, req.ConversationID, req.CustomerName, "customer", req.Message, "[]"); err != nil {
+		// 1. Save customer message (idempotent on retries; see SaveMessageIfAbsent).
+		if err := st.SaveMessageIfAbsent(session.ActiveTenantID, req.AccountID, req.ConversationID, req.CustomerName, "customer", req.Message, "[]"); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to save message."}})
 			return
 		}

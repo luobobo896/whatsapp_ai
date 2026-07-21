@@ -5,7 +5,6 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"golang.org/x/crypto/bcrypt"
 
 	"whatsapp-ai-poc/internal/middleware"
 	"whatsapp-ai-poc/internal/model"
@@ -87,12 +86,12 @@ func handleCreateTenant(st *store.Store) gin.HandlerFunc {
 		}
 		// Generate admin credentials before creating the tenant transaction.
 		password := randomPassword(16)
-		hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+		hash, err := HashPassword(password)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to hash password."}})
 			return
 		}
-		tenant, owner, err := st.CreateTenantWithOwner(req.Name, string(hash), session.User.ID)
+		tenant, owner, err := st.CreateTenantWithOwner(req.Name, hash, session.User.ID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to create tenant."}})
 			return
@@ -130,12 +129,18 @@ func handleUpdateTenantStatus(st *store.Store) gin.HandlerFunc {
 			c.JSON(http.StatusNotFound, gin.H{"error": model.ErrorDetail{Code: "NOT_FOUND", Message: "Tenant not found."}})
 			return
 		}
-		if err := st.UpdateTenantStatus(tenantID, req.Status); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to update tenant."}})
-			return
-		}
+		// Reconcile OpenClaw FIRST so that on failure the tenant status in the
+		// database is left untouched and the 502 response accurately reports
+		// that nothing changed. If reconcile succeeds but the subsequent DB
+		// commit fails, the next SyncOpenClawRAGAccounts run (e.g. on
+		// restart) re-derives the routes from the still-old DB status, so the
+		// two states self-heal instead of silently diverging.
 		if err := ReconcileTenantOpenClawRAG(st, tenantID, req.Status); err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": model.ErrorDetail{Code: "OPENCLAW_ERROR", Message: err.Error()}})
+			return
+		}
+		if err := st.UpdateTenantStatus(tenantID, req.Status); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to update tenant."}})
 			return
 		}
 		c.Status(http.StatusNoContent)
