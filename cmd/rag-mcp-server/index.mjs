@@ -26,8 +26,12 @@ const ACCOUNT_ID = process.env.WHATSAPP_AI_ACCOUNT_ID || "";
 const knowledgeByConversation = new Map();
 const KNOWLEDGE_CONTEXT_TTL_MS = 5 * 60 * 1000;
 
-function rememberKnowledge(conversationId, ids) {
-  const entry = { ids: JSON.stringify(ids), expiresAt: Date.now() + KNOWLEDGE_CONTEXT_TTL_MS };
+function rememberKnowledge(conversationId, ids, retrievalToken) {
+	const entry = {
+		ids: JSON.stringify(ids),
+		retrievalToken,
+		expiresAt: Date.now() + KNOWLEDGE_CONTEXT_TTL_MS,
+	};
   knowledgeByConversation.set(conversationId, entry);
   const timer = setTimeout(() => {
     if (knowledgeByConversation.get(conversationId) === entry) {
@@ -38,9 +42,9 @@ function rememberKnowledge(conversationId, ids) {
 }
 
 function takeKnowledge(conversationId) {
-  const entry = knowledgeByConversation.get(conversationId);
-  knowledgeByConversation.delete(conversationId);
-  return entry && entry.expiresAt > Date.now() ? entry.ids : "[]";
+	const entry = knowledgeByConversation.get(conversationId);
+	knowledgeByConversation.delete(conversationId);
+	return entry && entry.expiresAt > Date.now() ? entry : null;
 }
 
 if (!API_TOKEN) {
@@ -54,12 +58,7 @@ if (!ACCOUNT_ID) {
 
 // ---- helpers -----------------------------------------------------------
 
-// Default per-request timeout (ms). callers may pass a shorter deadline.
-const DEFAULT_API_TIMEOUT_MS = 15000;
-
-// Wrap fetch with an abort deadline so a hung backend cannot pin the agent
-// session forever. AbortSignal.timeout throws a TimeoutError on expiry.
-async function apiPost(path, body, timeoutMs = DEFAULT_API_TIMEOUT_MS) {
+async function apiPost(path, body) {
   const url = `${API_URL}${path}`;
   const resp = await fetch(url, {
     method: "POST",
@@ -68,7 +67,6 @@ async function apiPost(path, body, timeoutMs = DEFAULT_API_TIMEOUT_MS) {
       Authorization: `Bearer ${API_TOKEN}`,
     },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!resp.ok) {
     const text = await resp.text();
@@ -146,24 +144,31 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
-  if (name === "save_reply") {
-    const { conversationId, customerName, content } = args;
-    try {
+	if (name === "save_reply") {
+		const { conversationId, customerName, content } = args;
+		const retrieval = takeKnowledge(conversationId);
+		if (!retrieval) {
+			return {
+				content: [{ type: "text", text: "请先查询当前客户问题的业务资料，再形成并保存回复。" }],
+				isError: true,
+			};
+		}
+		try {
       await apiPost("/api/internal/conversations/reply", {
         conversationId,
         accountId: ACCOUNT_ID,
         customerName: customerName || conversationId,
         content,
-        knowledgeIds: takeKnowledge(conversationId),
-      }, 10000);
+				knowledgeIds: retrieval.ids,
+				retrievalToken: retrieval.retrievalToken,
+      });
       return {
         content: [{
           type: "text",
           text: "回复内容已记录。现在仅输出与 content 完全相同的客服回复，不要提及记录、检索、资料来源或任何内部流程。",
         }],
       };
-    } catch (err) {
-      console.error("[rag-mcp] save_reply failed:", err?.message || err);
+    } catch {
       return {
         content: [{ type: "text", text: "客服回复记录暂未保存；不要向客户透露内部错误或技术细节。" }],
         isError: true,
@@ -186,12 +191,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       customerName: customerName || conversationId,
       maxHistory: 10,
       maxKnowledge: 5,
-    }, 15000);
+    });
 
-    rememberKnowledge(
-      conversationId,
-      (data.knowledge || []).map((item) => item.id).filter(Boolean),
-    );
+		if (!data.retrievalToken) {
+		}
+		rememberKnowledge(
+			conversationId,
+			(data.knowledge || []).map((item) => item.id).filter(Boolean),
+			data.retrievalToken,
+		);
 
     // The backend already generates a persona-aware system prompt.
     // Pass it through as the primary instruction for the agent.
@@ -233,7 +241,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     return { content: [{ type: "text", text: result }] };
   } catch (err) {
-    console.error("[rag-mcp] search_knowledge failed:", err?.message || err);
     knowledgeByConversation.delete(conversationId);
     return {
       content: [

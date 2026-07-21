@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"whatsapp-ai-poc/internal/embedding"
 	"whatsapp-ai-poc/internal/model"
 )
 
@@ -28,7 +29,10 @@ type ChunkInfo struct {
 	Content string
 }
 
-type Store struct{ pool *pgxpool.Pool }
+type Store struct {
+	pool  *pgxpool.Pool
+	embed *embedding.Client
+}
 
 var ErrDailyReplyLimitReached = errors.New("daily reply limit reached")
 
@@ -51,7 +55,7 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 		pool.Close()
 		return nil, fmt.Errorf("ping pg: %w", err)
 	}
-	s := &Store{pool: pool}
+	s := &Store{pool: pool, embed: embedding.NewFromEnv()}
 	if err := s.migrate(ctx); err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
@@ -791,83 +795,47 @@ func (s *Store) searchKnowledge(tenantID string, baseIDs []string, query string,
 	if limit <= 0 {
 		limit = 5
 	}
-	// Vector search via Go cosine similarity if embedding provided.
+	// Vector search via pgvector ANN (cosine) when an embedding is provided.
+	// Similarity is computed in the DB (ORDER BY vec <=> query) so embeddings
+	// are never pulled over the wire.
 	if len(embedding) > 0 {
-		vectorArgs := []any{tenantID}
+		queryVec := formatVectorText(embedding)
+		vectorArgs := []any{tenantID, queryVec}
 		baseFilter := ""
-		argIdx := 2
+		argIdx := 3
 		if len(baseIDs) > 0 {
 			baseFilter = fmt.Sprintf(" AND k.id = ANY($%d)", argIdx)
 			vectorArgs = append(vectorArgs, baseIDs)
 			argIdx++
 		}
-		// Cap the candidate set so we do not pull every chunk+embedding for the
-		// tenant into Go heap. For very large corpora a server-side ANN/pgvector
-		// index would be the right long-term fix.
-		const vectorCandidateLimit = 500
-		vectorArgs = append(vectorArgs, vectorCandidateLimit)
+		// fetch a few more than `limit` so article-level dedup still yields enough
+		vectorArgs = append(vectorArgs, limit*3)
 		limitArgIdx := argIdx
 		rows, err := s.pool.Query(context.Background(),
-			"SELECT a.id, a.title, a.content, a.category, a.attributes, k.name AS kb_name, c.id, c.embedding FROM knowledge_chunks c JOIN knowledge_articles a ON c.article_id = a.id JOIN knowledge_bases k ON a.knowledge_base_id = k.id WHERE k.tenant_id=$1 AND a.status='active' AND k.status='active' AND c.embedding IS NOT NULL"+baseFilter+fmt.Sprintf(" LIMIT $%d", limitArgIdx), vectorArgs...)
+			"SELECT a.id, a.title, a.content, a.category, a.attributes, k.name AS kb_name, 1-(c.vec <=> $2) AS score FROM knowledge_chunks c JOIN knowledge_articles a ON c.article_id = a.id JOIN knowledge_bases k ON a.knowledge_base_id = k.id WHERE k.tenant_id=$1 AND a.status='active' AND k.status='active' AND c.vec IS NOT NULL AND 1-(c.vec <=> $2) >= 0.2"+baseFilter+fmt.Sprintf(" ORDER BY c.vec <=> $2 LIMIT $%d", limitArgIdx), vectorArgs...)
 		if err != nil {
-			slog.Warn("knowledge vector query failed; falling back to ILIKE", "tenant_id", tenantID, "err", err)
+			slog.Warn("knowledge pgvector query failed; falling back to ILIKE", "tenant_id", tenantID, "err", err)
 		} else {
-			type row struct {
-				artID, title, content, category, attrs, kbName, chunkID, emb string
-			}
-			var chunks []row
+			seen := map[string]bool{}
+			var list []model.SearchResultItem
 			for rows.Next() {
-				var r row
-				if err := rows.Scan(&r.artID, &r.title, &r.content, &r.category, &r.attrs, &r.kbName, &r.chunkID, &r.emb); err != nil {
+				var it model.SearchResultItem
+				var kbName string
+				if err := rows.Scan(&it.ID, &it.Title, &it.Content, &it.Category, &it.Attributes, &kbName, &it.Score); err != nil {
 					slog.Warn("knowledge vector row scan failed; skipping chunk", "err", err)
 					continue
 				}
-				chunks = append(chunks, r)
+				it.KnowledgeBaseName = kbName
+				if seen[it.ID] {
+					continue
+				}
+				seen[it.ID] = true
+				list = append(list, it)
+				if len(list) >= limit {
+					break
+				}
 			}
 			rows.Close()
-			queryVec := make([]float64, len(embedding))
-			for i, v := range embedding {
-				queryVec[i] = float64(v)
-			}
-			// Drop near-zero matches; cosine similarity below this threshold is
-			// treated as "no relevant knowledge" so the caller falls back to ILIKE
-			// or the canned "I don't know" reply instead of surfacing noise.
-			const minVectorScore = 0.2
-			type scored struct {
-				item  model.SearchResultItem
-				score float64
-			}
-			var results []scored
-			for _, ck := range chunks {
-				var embVec []float64
-				if json.Unmarshal([]byte(ck.emb), &embVec) != nil || len(embVec) == 0 {
-					continue
-				}
-				if len(embVec) != len(queryVec) {
-					slog.Warn("embedding dimension mismatch; skipping chunk", "chunk_id", ck.chunkID, "want", len(queryVec), "got", len(embVec))
-					continue
-				}
-				sim := cosineSimilarity(queryVec, embVec)
-				if sim < minVectorScore {
-					continue
-				}
-				results = append(results, scored{
-					item:  model.SearchResultItem{ID: ck.artID, Title: ck.title, Content: ck.content, Category: ck.category, Attributes: ck.attrs, KnowledgeBaseName: ck.kbName, Score: sim},
-					score: sim,
-				})
-			}
-			sort.Slice(results, func(i, j int) bool { return results[i].score > results[j].score })
-			seen := map[string]bool{}
-			var list []model.SearchResultItem
-			for _, s := range results {
-				if !seen[s.item.ID] {
-					seen[s.item.ID] = true
-					list = append(list, s.item)
-					if len(list) >= limit {
-						break
-					}
-				}
-			}
 			if len(list) > 0 {
 				return list, nil
 			}
@@ -990,15 +958,98 @@ func (s *Store) ChunkArticle(articleID, content string) error {
 	return tx.Commit(ctx)
 }
 
-// UpdateChunkEmbedding sets the embedding vector for a chunk.
+// UpdateChunkEmbedding sets the embedding vector for a chunk (both the JSON
+// text column and the pgvector vec column used for ANN search).
 func (s *Store) UpdateChunkEmbedding(chunkID string, embedding []float32) error {
 	b, err := json.Marshal(embedding)
 	if err != nil {
 		return err
 	}
 	_, err = s.pool.Exec(context.Background(),
-		"UPDATE knowledge_chunks SET embedding=$1 WHERE id=$2", string(b), chunkID)
+		"UPDATE knowledge_chunks SET embedding=$1, vec=$2::vector WHERE id=$3", string(b), formatVectorText(embedding), chunkID)
 	return err
+}
+
+// formatVectorText renders a vector as pgvector literal text: "[0.1,0.2,...]".
+func formatVectorText(v []float32) string {
+	var b strings.Builder
+	b.WriteByte('[')
+	for i, f := range v {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(strconv.FormatFloat(float64(f), 'f', -1, 32))
+	}
+	b.WriteByte(']')
+	return b.String()
+}
+
+// EmbedTexts returns the embedding for the first text (used for query
+// embedding). nil if embedder unset or the call fails → caller falls back to
+// keyword (ILIKE) search.
+func (s *Store) EmbedTexts(texts []string) []float32 {
+	if s.embed == nil || len(texts) == 0 {
+		return nil
+	}
+	vecs, err := s.embed.Embed(texts)
+	if err != nil {
+		slog.Warn("embed texts failed; falling back to keyword search", "error", err)
+		return nil
+	}
+	if len(vecs) == 0 {
+		return nil
+	}
+	return vecs[0]
+}
+
+// embedPendingChunks generates and stores embeddings for chunks of one article
+// (articleID == "" → all chunks lacking an embedding). Best-effort: failures
+// only log a warning, so article create/update never fails because the
+// embedding service is down; a background backfill catches up later.
+func (s *Store) embedPendingChunks(articleID string) {
+	if s.embed == nil {
+		return
+	}
+	ctx := context.Background()
+	q := "SELECT id, content FROM knowledge_chunks WHERE embedding IS NULL"
+	args := []any{}
+	if articleID != "" {
+		q += " AND article_id=$1"
+		args = append(args, articleID)
+	}
+	rows, err := s.pool.Query(ctx, q, args...)
+	if err != nil {
+		slog.Warn("query pending chunks failed", "error", err)
+		return
+	}
+	var ids, texts []string
+	for rows.Next() {
+		var id, content string
+		if err := rows.Scan(&id, &content); err != nil {
+			rows.Close()
+			slog.Warn("scan pending chunk failed", "error", err)
+			return
+		}
+		ids = append(ids, id)
+		texts = append(texts, content)
+	}
+	rows.Close()
+	if len(texts) == 0 {
+		return
+	}
+	vecs, err := s.embed.Embed(texts)
+	if err != nil {
+		slog.Warn("embed pending chunks failed", "count", len(texts), "error", err)
+		return
+	}
+	for i := range vecs {
+		if i >= len(ids) {
+			break
+		}
+		if err := s.UpdateChunkEmbedding(ids[i], vecs[i]); err != nil {
+			slog.Warn("update chunk embedding failed", "chunk_id", ids[i], "error", err)
+		}
+	}
 }
 
 // GetChunksWithoutEmbeddings returns chunks that need embedding.
@@ -1411,6 +1462,7 @@ func (s *Store) CreateArticle(kbID, title, content, category, attributes string)
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
+	s.embedPendingChunks(a.ID)
 	return a, nil
 }
 
@@ -1458,7 +1510,11 @@ func (s *Store) createArticlesBatch(ctx context.Context, kbID string, articles [
 			return err
 		}
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	s.embedPendingChunks("")
+	return nil
 }
 
 func (s *Store) UpdateArticle(id, kbID, tenantID string, title, content, category, attributes, status *string) (*model.KnowledgeArticleRow, error) {
@@ -1511,6 +1567,7 @@ func (s *Store) UpdateArticle(id, kbID, tenantID string, title, content, categor
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
+	s.embedPendingChunks(a.ID)
 	return a, nil
 }
 

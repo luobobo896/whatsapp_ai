@@ -163,7 +163,7 @@ func handleInternalConversationQuery(st *store.Store) gin.HandlerFunc {
 		}
 
 		// 2. Search only the knowledge bases bound to this account.
-		results, err := st.SearchKnowledgeForBases(tenantID, accountKnowledgeBaseIDs(acctRow), req.Message, nil, req.MaxKnowledge)
+		results, err := st.SearchKnowledgeForBases(tenantID, accountKnowledgeBaseIDs(acctRow), req.Message, st.EmbedTexts([]string{req.Message}), req.MaxKnowledge)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to search knowledge."}})
 			return
@@ -322,7 +322,7 @@ func handleConversationQuery(st *store.Store) gin.HandlerFunc {
 		}
 
 		// 2. Search knowledge
-		results, err := st.SearchKnowledgeForBases(session.ActiveTenantID, accountKnowledgeBaseIDs(account), req.Message, nil, req.MaxKnowledge)
+		results, err := st.SearchKnowledgeForBases(session.ActiveTenantID, accountKnowledgeBaseIDs(account), req.Message, st.EmbedTexts([]string{req.Message}), req.MaxKnowledge)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to search knowledge."}})
 			return
