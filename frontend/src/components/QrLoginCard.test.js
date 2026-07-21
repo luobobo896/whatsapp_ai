@@ -141,4 +141,51 @@ describe("QrLoginCard", () => {
     expect(wrapper.text()).toContain("OpenClaw gateway restart failed");
     wrapper.unmount();
   });
+
+  it("does not overlap QR status requests when a poll is still pending", async () => {
+    vi.useFakeTimers();
+    post.mockResolvedValue({
+      qrData: pngDataUrl,
+      expiresAt: new Date(Date.now() + 30000).toISOString(),
+    });
+    let resolvePoll;
+    get.mockImplementation(() => new Promise((resolve) => { resolvePoll = resolve; }));
+
+    const wrapper = mountCard();
+    await wrapper.find("button").trigger("click");
+    await flushPromises();
+
+    await vi.advanceTimersByTimeAsync(12000);
+    expect(get).toHaveBeenCalledTimes(1);
+
+    resolvePoll({ status: "qr_pending" });
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(get).toHaveBeenCalledTimes(2);
+    wrapper.unmount();
+  });
+
+  it("ignores a pending QR status response after starting a new QR session", async () => {
+    vi.useFakeTimers();
+    const replacementQr = "data:image/png;base64,bmV3";
+    post
+      .mockResolvedValueOnce({ qrData: pngDataUrl, expiresAt: new Date(Date.now() + 30000).toISOString() })
+      .mockResolvedValueOnce({ qrData: replacementQr, expiresAt: new Date(Date.now() + 30000).toISOString() });
+    let resolvePoll;
+    get.mockImplementation(() => new Promise((resolve) => { resolvePoll = resolve; }));
+
+    const wrapper = mountCard();
+    await wrapper.find("button").trigger("click");
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(3000);
+
+    await wrapper.vm.fetchQr();
+    await flushPromises();
+
+    resolvePoll({ status: "connected" });
+    await flushPromises();
+    expect(wrapper.emitted("connected")).toBeUndefined();
+    expect(wrapper.find("img").attributes("src")).toBe(replacementQr);
+    wrapper.unmount();
+  });
 });

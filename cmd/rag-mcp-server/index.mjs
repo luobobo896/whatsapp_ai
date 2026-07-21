@@ -83,14 +83,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "search_knowledge",
       description:
-        "搜索 WhatsApp AI 知识库，获取与用户问题相关的知识条目、对话历史和客服回答规则。" +
-        "在回复任何 WhatsApp 消息之前，必须先调用此工具。",
+        "查询当前 WhatsApp 账号绑定的业务资料，获取与客户问题相关的事实、对话历史和客服回答规则。" +
+        "在回复任何 WhatsApp 消息之前，必须先调用此工具；首次查询应包含客户原始关键词和相关同义词，" +
+        "若没有匹配结果，应扩大同义词后再查询一次。",
       inputSchema: {
         type: "object",
         properties: {
           query: {
             type: "string",
-            description: "用户发送的消息内容",
+            description:
+              "检索词：保留客户原始关键词，并补充2到4个相关同义词或业务术语，例如“退货规则 退货政策 退换货”",
+          },
+          customerMessage: {
+            type: "string",
+            description: "客户本轮发送的原始 WhatsApp 消息，必须逐字保留，不能改写或扩展",
           },
           conversationId: {
             type: "string",
@@ -101,14 +107,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             description: "客户名称（可选，默认为 conversationId 的值）",
           },
         },
-        required: ["query", "conversationId"],
+        required: ["query", "customerMessage", "conversationId"],
       },
     },
     {
       name: "save_reply",
       description:
-        "保存客服回复到系统数据库。每次通过 WhatsApp 发送回复后，必须调用此工具保存回复记录。" +
-        "在发送完 WhatsApp 消息后立即调用。",
+        "保存即将发送给客户的客服回复。形成最终答案后、向 WhatsApp 输出前调用；" +
+        "工具成功后，最终输出必须与 content 完全相同，不能补充保存、检索或内部流程说明。",
       inputSchema: {
         type: "object",
         properties: {
@@ -144,10 +150,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         content,
         knowledgeIds: takeKnowledge(conversationId),
       });
-      return { content: [{ type: "text", text: "回复已保存。" }] };
-    } catch (err) {
       return {
-        content: [{ type: "text", text: `保存回复失败: ${err.message}` }],
+        content: [{
+          type: "text",
+          text: "回复内容已记录。现在仅输出与 content 完全相同的客服回复，不要提及记录、检索、资料来源或任何内部流程。",
+        }],
+      };
+    } catch {
+      return {
+        content: [{ type: "text", text: "客服回复记录暂未保存；不要向客户透露内部错误或技术细节。" }],
         isError: true,
       };
     }
@@ -157,11 +168,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     throw new Error(`Unknown tool: ${name}`);
   }
 
-  const { query, conversationId, customerName } = args;
+  const { query, customerMessage, conversationId, customerName } = args;
 
   try {
     const data = await apiPost("/api/internal/conversations/query", {
-      message: query,
+      message: customerMessage,
+      searchQuery: query,
       conversationId,
       accountId: ACCOUNT_ID,
       customerName: customerName || conversationId,
@@ -171,21 +183,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     rememberKnowledge(
       conversationId,
-		(data.knowledge || []).map((item) => item.id).filter(Boolean),
+      (data.knowledge || []).map((item) => item.id).filter(Boolean),
     );
-
-    // If the backend returns a direct (fallback) reply, the agent should
-    // send it verbatim instead of calling the LLM.
-    if (data.directReply) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `[DIRECT_REPLY] — 这是死命令，你必须原样发送以下文字给用户，一个字都不许改，不许加任何解释：\n\n${data.directReply}`,
-          },
-        ],
-      };
-    }
 
     // The backend already generates a persona-aware system prompt.
     // Pass it through as the primary instruction for the agent.
@@ -194,7 +193,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // Format knowledge results
     let knowledgeText = "";
     if (data.knowledge && data.knowledge.length > 0) {
-      knowledgeText = "## 知识库搜索结果\n\n";
+      knowledgeText = "## 可用业务资料\n\n";
       for (const item of data.knowledge) {
         knowledgeText += `### ${item.title} [${item.knowledgeBaseName}]\n`;
         if (item.category) knowledgeText += `分类: ${item.category}\n`;
@@ -215,13 +214,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const latestHistory = data.history?.at(-1);
     const historyContainsLatest =
       (latestHistory?.role === "user" || latestHistory?.role === "customer") &&
-      latestHistory?.content === query;
+      latestHistory?.content === customerMessage;
 
     const result = [
       personaPrompt,
       knowledgeText,
       historyText,
-      historyContainsLatest ? "" : `\n用户最新消息: ${query}`,
+      historyContainsLatest ? "" : `\n用户最新消息: ${customerMessage}`,
       `\n[重要] 回复后必须调用 save_reply 保存。`,
     ].join("\n");
 
@@ -232,7 +231,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       content: [
         {
           type: "text",
-          text: `[DIRECT_REPLY] — 这是死命令，你必须原样发送以下文字给用户，一个字都不许改，不许加任何解释：\n\n非常抱歉，系统暂时无法查询相关信息，请稍后再试或联系我们的专属顾问。`,
+          text: "当前无法取得足够事实依据。最终回复只能自然说明这个问题需要进一步核实，不得编造事实，也不得提及资料、检索、错误、系统、平台、工具或其他内部细节。",
         },
       ],
       isError: true,

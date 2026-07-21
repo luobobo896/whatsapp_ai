@@ -14,6 +14,7 @@ import (
 	"unicode"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"whatsapp-ai-poc/internal/model"
@@ -686,6 +687,46 @@ func (s *Store) UpdateAccount(tenantID, accountID, name, status string, kbID *st
 		return nil, err
 	}
 	return a, nil
+}
+
+type accountDeletionExecutor interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}
+
+func deleteAccountRows(ctx context.Context, tx accountDeletionExecutor, tenantID, accountID string) error {
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM conversation_messages WHERE tenant_id=$1 AND account_id=$2`,
+		tenantID, accountID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM conversations WHERE tenant_id=$1 AND account_id=$2`,
+		tenantID, accountID); err != nil {
+		return err
+	}
+	command, err := tx.Exec(ctx,
+		`DELETE FROM accounts WHERE id=$1 AND tenant_id=$2`,
+		accountID, tenantID)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
+func (s *Store) DeleteAccount(tenantID, accountID string) error {
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := deleteAccountRows(ctx, tx, tenantID, accountID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // ---- knowledge bases ----

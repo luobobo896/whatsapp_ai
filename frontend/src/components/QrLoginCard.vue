@@ -16,12 +16,14 @@ const errorMsg = ref("");
 const connectionTimedOut = ref(false);
 let timer = null;
 let pollTimer = null;
+let pollGeneration = 0;
+let pollingGeneration = null;
 let connectionTimer = null;
 let connectionDeadline = 0;
 
 onUnmounted(() => {
+  stopPolling();
   clearInterval(timer);
-  clearInterval(pollTimer);
   clearTimeout(connectionTimer);
 });
 
@@ -39,15 +41,16 @@ function secondsUntil(expiresAt) {
 }
 
 async function fetchQr() {
+  const generation = stopPolling();
   loading.value = true;
   errorMsg.value = "";
   connectionTimedOut.value = false;
   connectionDeadline = 0;
   clearInterval(timer);
-  clearInterval(pollTimer);
   clearTimeout(connectionTimer);
   try {
     const resp = await post(`/api/accounts/${props.account.id}/qr-login`, {}, props.csrfToken);
+    if (generation !== pollGeneration) return;
     if (resp.status === "connected") {
       status.value = "connected";
       showToast({ tone: "success", message: "WhatsApp 已连接" });
@@ -59,13 +62,22 @@ async function fetchQr() {
     qrTotal.value = countdown.value;
     status.value = "qr_pending";
     startCountdown();
-    startPolling();
+    startPolling(generation);
   } catch (e) {
+    if (generation !== pollGeneration) return;
     errorMsg.value = messageForError(e);
     showToast({ tone: "error", message: errorMsg.value });
   } finally {
-    loading.value = false;
+    if (generation === pollGeneration) loading.value = false;
   }
+}
+
+function stopPolling() {
+  pollGeneration++;
+  clearInterval(pollTimer);
+  pollTimer = null;
+  pollingGeneration = null;
+  return pollGeneration;
 }
 
 function startCountdown() {
@@ -82,11 +94,10 @@ function startCountdown() {
 }
 
 function expireConnectionWait() {
+  stopPolling();
   clearInterval(timer);
-  clearInterval(pollTimer);
   clearTimeout(connectionTimer);
   timer = null;
-  pollTimer = null;
   connectionTimer = null;
   qrData.value = "";
   countdown.value = 0;
@@ -114,11 +125,14 @@ function startConnectionWait(expiresAt) {
   status.value = "connecting";
 }
 
-function startPolling() {
+function startPolling(generation) {
   clearInterval(pollTimer);
   pollTimer = setInterval(async () => {
+    if (generation !== pollGeneration || pollingGeneration === generation) return;
+    pollingGeneration = generation;
     try {
       const resp = await get(`/api/accounts/${props.account.id}/qr-status`);
+      if (generation !== pollGeneration) return;
       if (resp.qrData && resp.qrData !== qrData.value) {
         qrData.value = resp.qrData;
         countdown.value = secondsUntil(resp.expiresAt);
@@ -128,11 +142,10 @@ function startPolling() {
         startCountdown();
       }
       if (resp.status === "connected") {
+        stopPolling();
         clearInterval(timer);
-        clearInterval(pollTimer);
         clearTimeout(connectionTimer);
         timer = null;
-        pollTimer = null;
         connectionTimer = null;
         status.value = "connected";
         showToast({ tone: "success", message: "WhatsApp 已连接" });
@@ -147,30 +160,33 @@ function startPolling() {
         if (status.value === "connecting") {
           expireConnectionWait();
         } else {
+          stopPolling();
           clearInterval(timer);
-          clearInterval(pollTimer);
           timer = null;
-          pollTimer = null;
           qrData.value = "";
           status.value = "expired";
         }
       }
     } catch (error) {
+      if (generation !== pollGeneration) return;
       errorMsg.value = messageForError(error);
+    } finally {
+      if (generation === pollGeneration && pollingGeneration === generation) {
+        pollingGeneration = null;
+      }
     }
   }, 3000);
 }
 
 async function disconnect() {
+  stopPolling();
   loading.value = true;
   try {
     await post(`/api/accounts/${props.account.id}/disconnect`, {}, props.csrfToken);
     status.value = "pending";
     clearInterval(timer);
-    clearInterval(pollTimer);
     clearTimeout(connectionTimer);
     timer = null;
-    pollTimer = null;
     connectionTimer = null;
     connectionDeadline = 0;
     countdown.value = 0;

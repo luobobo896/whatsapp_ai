@@ -1,12 +1,16 @@
 <script setup>
-import { ref, computed } from "vue";
-import { Edit, MessageCircle, Plus, Plug, QrCode } from "lucide-vue-next";
+import { ref, computed, inject } from "vue";
+import { Edit, MessageCircle, Plus, Plug, QrCode, Trash2 } from "lucide-vue-next";
+import { ElMessageBox } from "element-plus";
+import { del, get, messageForError } from "../api";
 import { formatDate } from "../utils";
 import QrLoginCard from "../components/QrLoginCard.vue";
 
 const props = defineProps({ accounts: Array, canManage: Boolean, csrfToken: String, knowledgeBases: Array });
 const emit = defineEmits(["create", "chat", "edit", "changed"]);
 const qrAccount = ref(null);
+const deletingAccountId = ref("");
+const showToast = inject("showToast");
 
 const kbMap = computed(() => {
   const map = {};
@@ -25,6 +29,50 @@ function remainingKnowledgeCount(ids) {
 function onAccountChanged() {
   qrAccount.value = null;
   emit("changed");
+}
+
+async function removeAccount(account) {
+  try {
+    await ElMessageBox.confirm(
+      `确定删除“${account.name}”吗？该客服的全部会话记录将永久删除，知识库不会受影响。`,
+      "确认删除",
+      { confirmButtonText: "删除", cancelButtonText: "取消", type: "warning" },
+    );
+  } catch { return; }
+  deletingAccountId.value = account.id;
+  try {
+    const result = await del(`/api/accounts/${account.id}`, props.csrfToken);
+    if (result?.status === "deleting") {
+      showToast({ tone: "info", message: "客服账号正在后台删除" });
+      const deleted = await waitForAccountDeletion(account.id);
+      showToast({
+        tone: deleted ? "success" : "info",
+        message: deleted ? "客服账号已删除" : "删除仍在后台进行，请稍后刷新",
+      });
+    } else {
+      showToast({ tone: "success", message: "客服账号已删除" });
+    }
+    emit("changed");
+  } catch (error) {
+    showToast({ tone: "error", message: messageForError(error) });
+    emit("changed");
+  } finally {
+    deletingAccountId.value = "";
+  }
+}
+
+async function waitForAccountDeletion(accountId) {
+  const deadline = Date.now() + 40000;
+  while (Date.now() < deadline) {
+    try {
+      const response = await get("/api/accounts");
+      if (!(response.accounts || []).some((item) => item.id === accountId)) return true;
+    } catch {
+      // A later poll may succeed after a transient network or gateway restart.
+    }
+    await new Promise((resolve) => setTimeout(resolve, Math.min(1000, deadline - Date.now())));
+  }
+  return false;
 }
 </script>
 
@@ -80,7 +128,7 @@ function onAccountChanged() {
       <el-table-column label="创建时间" width="162">
         <template #default="{ row }">{{ formatDate(row.createdAt) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="260">
+      <el-table-column label="操作" width="300">
         <template #default="{ row }">
           <el-button
             v-if="canManage"
@@ -91,7 +139,7 @@ function onAccountChanged() {
             编辑
           </el-button>
           <el-button
-            v-if="canManage && row.status !== 'connected'"
+            v-if="canManage && row.status === 'pending'"
             size="small"
             type="primary"
             :icon="QrCode"
@@ -116,6 +164,17 @@ function onAccountChanged() {
           >
             管理连接
           </el-button>
+          <el-button
+            v-if="canManage"
+            text
+            size="small"
+            type="danger"
+            :icon="Trash2"
+            :loading="deletingAccountId === row.id"
+            aria-label="删除客服账号"
+            title="删除客服账号"
+            @click="removeAccount(row)"
+          />
         </template>
       </el-table-column>
     </el-table>
