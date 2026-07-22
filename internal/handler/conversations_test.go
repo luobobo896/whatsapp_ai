@@ -211,3 +211,110 @@ func TestGenerateRetrievalTokenDiffersByConversation(t *testing.T) {
 		t.Fatal("tokens for different conversations must differ")
 	}
 }
+
+func TestDetectLanguage(t *testing.T) {
+	tests := []struct {
+		msg  string
+		want string
+	}{
+		{msg: "Hello, how are you?", want: "en"},
+		{msg: "你好，请问有什么可以帮助您？", want: "zh"},
+		{msg: "こんにちは、何かお手伝いできることはありますか？", want: "ja"},
+		{msg: "안녕하세요, 무엇을 도와드릴까요?", want: "ko"},
+		{msg: "Hallo, wie kann ich Ihnen helfen?", want: "de"},
+		{msg: "Bonjour, comment puis-je vous aider?", want: "fr"},
+		{msg: "Hola, ¿en qué puedo ayudarle?", want: "es"},
+		{msg: "Olá, como posso ajudá-lo?", want: "pt"},
+		{msg: "Привет, чем могу помочь?", want: "ru"},
+		{msg: "مرحبا، كيف يمكنني مساعدتك؟", want: "ar"},
+		{msg: "", want: "en"}, // 默认英语
+		{msg: "???!!", want: "en"}, // 无法识别时默认英语
+		{msg: "the quick brown fox", want: "en"},
+		{msg: "der die das ist nicht", want: "de"},
+		{msg: "le la les est et etre", want: "fr"},
+		{msg: "el la los por para que", want: "es"},
+		{msg: "o a os as por para", want: "pt"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.msg, func(t *testing.T) {
+			if got := detectLanguage(tt.msg); got != tt.want {
+				t.Fatalf("detectLanguage(%q) = %q, want %q", tt.msg, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFallbackReplyForMessageMultilingual(t *testing.T) {
+	tests := []struct {
+		msg      string
+		contains string
+	}{
+		{msg: "Hello", contains: "I'm sorry"},
+		{msg: "你好", contains: "非常抱歉"},
+		{msg: "こんにちは", contains: "申し訳ございません"},
+		{msg: "안녕하세요", contains: "죄송하지만"},
+		{msg: "Hallo", contains: "Entschuldigung"},
+		{msg: "Bonjour", contains: "Je vous prie"},
+		{msg: "Hola", contains: "Disculpe"},
+		{msg: "Olá", contains: "Desculpe"},
+		{msg: "Привет", contains: "Приношу извинения"},
+		{msg: "مرحبا", contains: "أعتذر"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.msg, func(t *testing.T) {
+			reply := fallbackReplyForMessage(tt.msg)
+			if !strings.Contains(reply, tt.contains) {
+				t.Fatalf("fallback for %q = %q, want to contain %q", tt.msg, reply, tt.contains)
+			}
+		})
+	}
+}
+
+func TestPersonaFallbackReplyMultilingual(t *testing.T) {
+	tests := []struct {
+		accountName string
+		msg         string
+		contains    string
+	}{
+		{accountName: "售前客服", msg: "Hello", contains: "one moment"},
+		{accountName: "售前客服", msg: "你好", contains: "这个我确认一下"},
+		{accountName: "售前客服", msg: "こんにちは", contains: "確認いたします"},
+		{accountName: "售后客服", msg: "Hello", contains: "shortly"},
+		{accountName: "售后客服", msg: "你好", contains: "这个我核实一下"},
+		{accountName: "售后客服", msg: "안녕하세요", contains: "답변 드리겠습니다"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.accountName+"/"+tt.msg, func(t *testing.T) {
+			reply := personaFallbackReply(tt.accountName, tt.msg)
+			if !strings.Contains(reply, tt.contains) {
+				t.Fatalf("persona fallback for %q/%q = %q, want to contain %q", tt.accountName, tt.msg, reply, tt.contains)
+			}
+		})
+	}
+}
+
+func TestBuildLanguageInstruction(t *testing.T) {
+	tests := []struct {
+		lang     string
+		contains string
+	}{
+		{lang: "en", contains: "English"},
+		{lang: "zh", contains: "中文"},
+		{lang: "ja", contains: "日本語"},
+		{lang: "ko", contains: "한국어"},
+		{lang: "de", contains: "Deutsch"},
+		{lang: "fr", contains: "français"},
+		{lang: "es", contains: "español"},
+		{lang: "pt", contains: "português"},
+		{lang: "ru", contains: "русском"},
+		{lang: "ar", contains: "العربية"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.lang, func(t *testing.T) {
+			instr := buildLanguageInstruction(tt.lang)
+			if !strings.Contains(instr, tt.contains) {
+				t.Fatalf("language instruction for %q = %q, want to contain %q", tt.lang, instr, tt.contains)
+			}
+		})
+	}
+}
