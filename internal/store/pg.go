@@ -182,6 +182,16 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_conv_msg_daily_reply ON conversation_messages(tenant_id, account_id, created_at) WHERE role='assistant'`,
 		`ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS message_id TEXT`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_conv_msg_dedup ON conversation_messages(tenant_id, conversation_id, message_id) WHERE message_id IS NOT NULL`,
+		// Proxy configuration and OpenClaw instance management
+		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS proxy_url TEXT`,
+		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS gateway_port INTEGER`,
+		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS gateway_ws_port INTEGER`,
+		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS instance_status TEXT NOT NULL DEFAULT 'stopped'`,
+		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS instance_pid INTEGER`,
+		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS config_path TEXT`,
+		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS last_health_check TIMESTAMPTZ`,
+		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS restart_count INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS last_restart_time TIMESTAMPTZ`,
 	}
 	for _, statement := range migrations {
 		if _, err := s.pool.Exec(ctx, statement); err != nil {
@@ -570,7 +580,11 @@ func (s *Store) AcceptInvitationForUser(invitationID, userID string) (*model.Ses
 func (s *Store) AllAccounts() ([]model.AccountRow, error) {
 	rows, err := s.pool.Query(context.Background(),
 		`SELECT id,tenant_id,name,account_key,status,daily_limit,kb_id,reply_limit,
-		        to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')
+		        to_char(created_at, 'YYYY-MM-DD HH24:MI:SS'),
+		        COALESCE(proxy_url, ''),COALESCE(gateway_port, 0),COALESCE(gateway_ws_port, 0),
+		        COALESCE(instance_status, 'stopped'),COALESCE(instance_pid, 0),
+		        COALESCE(config_path, ''),COALESCE(to_char(last_health_check, 'YYYY-MM-DD HH24:MI:SS'), ''),
+		        COALESCE(restart_count, 0),COALESCE(to_char(last_restart_time, 'YYYY-MM-DD HH24:MI:SS'), '')
 		 FROM accounts ORDER BY created_at`)
 	if err != nil {
 		return nil, err
@@ -579,7 +593,9 @@ func (s *Store) AllAccounts() ([]model.AccountRow, error) {
 	var list []model.AccountRow
 	for rows.Next() {
 		var a model.AccountRow
-		if err := rows.Scan(&a.ID, &a.TenantID, &a.Name, &a.AccountKey, &a.Status, &a.DailyLimit, &a.KbID, &a.ReplyLimit, &a.CreatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.TenantID, &a.Name, &a.AccountKey, &a.Status, &a.DailyLimit, &a.KbID, &a.ReplyLimit, &a.CreatedAt,
+			&a.ProxyURL, &a.GatewayPort, &a.GatewayWSPort, &a.InstanceStatus, &a.InstancePID,
+			&a.ConfigPath, &a.LastHealthCheck, &a.RestartCount, &a.LastRestartTime); err != nil {
 			return nil, err
 		}
 		list = append(list, a)
@@ -592,7 +608,10 @@ func (s *Store) AccountsByTenant(tenantID string) ([]model.Account, error) {
 		`SELECT a.id,a.name,a.account_key,a.status,a.daily_limit,
 		        (SELECT COUNT(*) FROM conversation_messages cm WHERE cm.tenant_id=$1 AND cm.account_id=a.id AND cm.role='assistant' AND cm.created_at >= date_trunc('day', CURRENT_TIMESTAMP)),
 		        a.kb_id,a.reply_limit,
-		        to_char(a.created_at, 'YYYY-MM-DD HH24:MI:SS')
+		        to_char(a.created_at, 'YYYY-MM-DD HH24:MI:SS'),
+		        COALESCE(a.proxy_url, ''),COALESCE(a.gateway_port, 0),COALESCE(a.gateway_ws_port, 0),
+		        COALESCE(a.instance_status, 'stopped'),
+		        COALESCE(a.config_path, ''),COALESCE(to_char(a.last_health_check, 'YYYY-MM-DD HH24:MI:SS'), '')
 		 FROM accounts a WHERE a.tenant_id=$1 ORDER BY a.created_at`, tenantID)
 	if err != nil {
 		return nil, err
@@ -602,7 +621,8 @@ func (s *Store) AccountsByTenant(tenantID string) ([]model.Account, error) {
 	for rows.Next() {
 		var a model.Account
 		var kbIDRaw string
-		if err := rows.Scan(&a.ID, &a.Name, &a.AccountKey, &a.Status, &a.DailyLimit, &a.DailyReplies, &kbIDRaw, &a.ReplyLimit, &a.CreatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.Name, &a.AccountKey, &a.Status, &a.DailyLimit, &a.DailyReplies, &kbIDRaw, &a.ReplyLimit, &a.CreatedAt,
+			&a.ProxyURL, &a.GatewayPort, &a.GatewayWSPort, &a.InstanceStatus, &a.ConfigPath, &a.LastHealthCheck); err != nil {
 			return nil, err
 		}
 		if kbIDRaw != "" {
@@ -637,9 +657,15 @@ func (s *Store) AccountByID(tenantID, accountID string) (*model.AccountRow, erro
 	a := &model.AccountRow{}
 	err := s.pool.QueryRow(context.Background(),
 		`SELECT id,tenant_id,name,account_key,status,daily_limit,kb_id,reply_limit,
-		        to_char(created_at, 'YYYY-MM-DD HH24:MI:SS')
+		        to_char(created_at, 'YYYY-MM-DD HH24:MI:SS'),
+		        COALESCE(proxy_url, ''),COALESCE(gateway_port, 0),COALESCE(gateway_ws_port, 0),
+		        COALESCE(instance_status, 'stopped'),COALESCE(instance_pid, 0),
+		        COALESCE(config_path, ''),COALESCE(to_char(last_health_check, 'YYYY-MM-DD HH24:MI:SS'), ''),
+		        COALESCE(restart_count, 0),COALESCE(to_char(last_restart_time, 'YYYY-MM-DD HH24:MI:SS'), '')
 		 FROM accounts WHERE id=$1 AND tenant_id=$2`, accountID, tenantID,
-	).Scan(&a.ID, &a.TenantID, &a.Name, &a.AccountKey, &a.Status, &a.DailyLimit, &a.KbID, &a.ReplyLimit, &a.CreatedAt)
+	).Scan(&a.ID, &a.TenantID, &a.Name, &a.AccountKey, &a.Status, &a.DailyLimit, &a.KbID, &a.ReplyLimit, &a.CreatedAt,
+		&a.ProxyURL, &a.GatewayPort, &a.GatewayWSPort, &a.InstanceStatus, &a.InstancePID,
+		&a.ConfigPath, &a.LastHealthCheck, &a.RestartCount, &a.LastRestartTime)
 	if err != nil {
 		return nil, err
 	}
@@ -710,6 +736,110 @@ func (s *Store) UpdateAccount(tenantID, accountID, name, status string, kbID *st
 		return nil, err
 	}
 	return a, nil
+}
+
+// UpdateAccountProxy updates proxy configuration and instance management fields for an account.
+func (s *Store) UpdateAccountProxy(tenantID, accountID, proxyURL string) (*model.AccountRow, error) {
+	a := &model.AccountRow{}
+	err := s.pool.QueryRow(context.Background(),
+		`UPDATE accounts SET proxy_url=$1
+		 WHERE id=$2 AND tenant_id=$3
+		 RETURNING id,tenant_id,name,account_key,status,daily_limit,kb_id,reply_limit,
+		         to_char(created_at, 'YYYY-MM-DD HH24:MI:SS'),
+		         COALESCE(proxy_url, ''),COALESCE(gateway_port, 0),COALESCE(gateway_ws_port, 0),
+		         COALESCE(instance_status, 'stopped'),COALESCE(instance_pid, 0),
+		         COALESCE(config_path, ''),COALESCE(to_char(last_health_check, 'YYYY-MM-DD HH24:MI:SS'), ''),
+		         COALESCE(restart_count, 0),COALESCE(to_char(last_restart_time, 'YYYY-MM-DD HH24:MI:SS'), '')`,
+		proxyURL, accountID, tenantID,
+	).Scan(&a.ID, &a.TenantID, &a.Name, &a.AccountKey, &a.Status, &a.DailyLimit, &a.KbID, &a.ReplyLimit, &a.CreatedAt,
+		&a.ProxyURL, &a.GatewayPort, &a.GatewayWSPort, &a.InstanceStatus, &a.InstancePID,
+		&a.ConfigPath, &a.LastHealthCheck, &a.RestartCount, &a.LastRestartTime)
+	if err != nil {
+		return nil, err
+	}
+	return a, nil
+}
+
+// UpdateAccountInstance updates instance management fields for an account.
+func (s *Store) UpdateAccountInstance(tenantID, accountID string, gatewayPort, gatewayWSPort, instancePID int, instanceStatus, configPath string) (*model.AccountRow, error) {
+	a := &model.AccountRow{}
+	err := s.pool.QueryRow(context.Background(),
+		`UPDATE accounts SET gateway_port=$1, gateway_ws_port=$2, instance_pid=$3, instance_status=$4, config_path=$5
+		 WHERE id=$6 AND tenant_id=$7
+		 RETURNING id,tenant_id,name,account_key,status,daily_limit,kb_id,reply_limit,
+		         to_char(created_at, 'YYYY-MM-DD HH24:MI:SS'),
+		         COALESCE(proxy_url, ''),COALESCE(gateway_port, 0),COALESCE(gateway_ws_port, 0),
+		         COALESCE(instance_status, 'stopped'),COALESCE(instance_pid, 0),
+		         COALESCE(config_path, ''),COALESCE(to_char(last_health_check, 'YYYY-MM-DD HH24:MI:SS'), ''),
+		         COALESCE(restart_count, 0),COALESCE(to_char(last_restart_time, 'YYYY-MM-DD HH24:MI:SS'), '')`,
+		gatewayPort, gatewayWSPort, instancePID, instanceStatus, configPath, accountID, tenantID,
+	).Scan(&a.ID, &a.TenantID, &a.Name, &a.AccountKey, &a.Status, &a.DailyLimit, &a.KbID, &a.ReplyLimit, &a.CreatedAt,
+		&a.ProxyURL, &a.GatewayPort, &a.GatewayWSPort, &a.InstanceStatus, &a.InstancePID,
+		&a.ConfigPath, &a.LastHealthCheck, &a.RestartCount, &a.LastRestartTime)
+	if err != nil {
+		return nil, err
+	}
+	return a, nil
+}
+
+// UpdateAccountHealthCheck updates the last health check timestamp for an account.
+func (s *Store) UpdateAccountHealthCheck(accountID string) error {
+	_, err := s.pool.Exec(context.Background(),
+		`UPDATE accounts SET last_health_check=CURRENT_TIMESTAMP WHERE id=$1`, accountID)
+	return err
+}
+
+// IncrementAccountRestartCount increments the restart count and updates last restart time.
+func (s *Store) IncrementAccountRestartCount(accountID string) error {
+	_, err := s.pool.Exec(context.Background(),
+		`UPDATE accounts SET restart_count=restart_count+1, last_restart_time=CURRENT_TIMESTAMP WHERE id=$1`, accountID)
+	return err
+}
+
+// AccountsNeedingHealthCheck returns accounts with running instances that need health checks.
+func (s *Store) AccountsNeedingHealthCheck(limit int) ([]struct {
+	ID          string
+	TenantID    string
+	InstancePID int
+	ProxyURL    string
+	GatewayPort int
+}, error) {
+	rows, err := s.pool.Query(context.Background(),
+		`SELECT id, tenant_id, COALESCE(instance_pid, 0), COALESCE(proxy_url, ''), COALESCE(gateway_port, 0)
+		 FROM accounts
+		 WHERE instance_status = 'running'
+		 ORDER BY last_health_check ASC NULLS FIRST
+		 LIMIT $1`,
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []struct {
+		ID          string
+		TenantID    string
+		InstancePID int
+		ProxyURL    string
+		GatewayPort int
+	}
+
+	for rows.Next() {
+		var r struct {
+			ID          string
+			TenantID    string
+			InstancePID int
+			ProxyURL    string
+			GatewayPort int
+		}
+		if err := rows.Scan(&r.ID, &r.TenantID, &r.InstancePID, &r.ProxyURL, &r.GatewayPort); err != nil {
+			return nil, err
+		}
+		results = append(results, r)
+	}
+
+	return results, rows.Err()
 }
 
 type accountDeletionExecutor interface {

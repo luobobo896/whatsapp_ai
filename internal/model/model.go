@@ -181,6 +181,13 @@ type Account struct {
 	KbID         []string `json:"kbId"`
 	ReplyLimit   int      `json:"replyLimit"`
 	CreatedAt    string   `json:"createdAt"`
+	// Proxy configuration and instance management
+	ProxyURL         string `json:"proxyUrl"`
+	GatewayPort      int    `json:"gatewayPort"`
+	GatewayWSPort    int    `json:"gatewayWsPort"`
+	InstanceStatus   string `json:"instanceStatus"`
+	ConfigPath       string `json:"configPath"`
+	LastHealthCheck  string `json:"lastHealthCheck"`
 }
 
 type AccountsResponse struct {
@@ -455,15 +462,25 @@ type InvitationRow struct {
 }
 
 type AccountRow struct {
-	ID         string
-	TenantID   string
-	Name       string
-	AccountKey string
-	Status     string
-	DailyLimit int
-	KbID       string
-	ReplyLimit int
-	CreatedAt  string
+	ID               string
+	TenantID         string
+	Name             string
+	AccountKey       string
+	Status           string
+	DailyLimit       int
+	KbID             string
+	ReplyLimit       int
+	CreatedAt        string
+	// Proxy configuration and instance management
+	ProxyURL         string
+	GatewayPort      int
+	GatewayWSPort    int
+	InstanceStatus   string
+	InstancePID      int
+	ConfigPath       string
+	LastHealthCheck  string
+	RestartCount     int
+	LastRestartTime  string
 }
 
 type KnowledgeRow struct {
