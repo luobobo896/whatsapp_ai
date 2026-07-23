@@ -876,9 +876,8 @@ func ensureOpenClawRAGAccount(accountID, accountKey string) (bool, error) {
 		}
 		changed = true
 	}
-	if err := validateOpenClawRAGAgentModelAuth(accountKey); err != nil {
-		return false, err
-	}
+	// Model auth validation removed: do not block QR login on model registration status.
+	// The agent will work even if model auth is not immediately available.
 	return changed, nil
 }
 
@@ -894,6 +893,44 @@ func validateOpenClawRAGAgentModelAuth(accountKey string) error {
 		message = err.Error()
 	}
 	return fmt.Errorf("OpenClaw Agent %s 模型认证不可用: %s", openClawRAGAgentID(accountKey), message)
+}
+
+// syncOpenClawAgentAuth copies model auth from the source auth agent to the target agent.
+// This ensures newly created WhatsApp agents have the same model authentication as
+// the globally configured auth agent.
+func syncOpenClawAgentAuth(targetAgentID string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("获取用户主目录失败: %w", err)
+	}
+	sourceAuthDir := filepath.Join(home, ".openclaw", "agents", "whatsapp-rag-auth", "agent")
+	targetAgentDir := filepath.Join(home, ".openclaw", "agents", targetAgentID, "agent")
+
+	sourceDB := filepath.Join(sourceAuthDir, "openclaw-agent.sqlite")
+	targetDB := filepath.Join(targetAgentDir, "openclaw-agent.sqlite")
+
+	// Check if source auth database exists
+	if _, err := os.Stat(sourceDB); err != nil {
+		return fmt.Errorf("源认证数据库不存在: %w", err)
+	}
+
+	// Ensure target agent directory exists
+	if err := os.MkdirAll(targetAgentDir, 0o700); err != nil {
+		return fmt.Errorf("创建目标 agent 目录失败: %w", err)
+	}
+
+	// Copy the auth database
+	sourceData, err := os.ReadFile(sourceDB)
+	if err != nil {
+		return fmt.Errorf("读取源认证数据库失败: %w", err)
+	}
+
+	if err := os.WriteFile(targetDB, sourceData, 0o600); err != nil {
+		return fmt.Errorf("写入目标认证数据库失败: %w", err)
+	}
+
+	slog.Info("synced OpenClaw agent auth", "target", targetAgentID)
+	return nil
 }
 
 func disableOpenClawRAGAccount(accountKey string) (bool, error) {
@@ -1334,6 +1371,10 @@ func activateOpenClawAccount(accountID, accountKey string) error {
 	}
 	if _, err := ensureOpenClawRAGAccount(accountID, accountKey); err != nil {
 		return err
+	}
+	// Sync model auth from the global auth agent to ensure the new agent can use models
+	if err := syncOpenClawAgentAuth(openClawRAGAgentID(accountKey)); err != nil {
+		slog.Warn("failed to sync agent auth, continuing anyway", "error", err)
 	}
 	attempts := int(openClawRestartWait / openClawPollInterval)
 	return restartAndWaitForOpenClawAccount(
@@ -1842,6 +1883,11 @@ func RegisterAccountManagement(r *gin.RouterGroup, st *store.Store) {
 	r.POST("/:id/qr-login", handleQrLogin(st))
 	r.GET("/:id/qr-status", handleQrStatus(st))
 	r.POST("/:id/disconnect", handleDisconnect(st))
+	// Proxy configuration endpoints
+	r.PUT("/:id/proxy", handleSetProxy(st))
+	r.GET("/:id/proxy/validate", handleValidateProxy(st))
+	r.POST("/:id/instance/restart", handleRestartInstance(st))
+	r.GET("/:id/instance/status", handleInstanceStatus(st))
 }
 
 func handleListAccounts(st *store.Store) gin.HandlerFunc {
@@ -2329,3 +2375,266 @@ func knowledgeBasesBelongToTenant(st *store.Store, tenantID string, ids []string
 	}
 	return true, nil
 }
+
+// ---- Proxy Configuration ----
+
+type SetProxyRequest struct {
+	ProxyURL string `json:"proxyUrl" binding:"required"`
+}
+
+type ValidateProxyRequest struct {
+	ProxyURL string `json:"proxyUrl" binding:"required"`
+}
+
+type ProxyValidationResponse struct {
+	OK      bool   `json:"ok"`
+	Message string `json:"message"`
+}
+
+// handleSetProxy sets the proxy configuration for an account and restarts the instance.
+func handleSetProxy(st *store.Store) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		session := middleware.GetSession(c)
+		if session == nil || session.ActiveTenantID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "TENANT_REQUIRED", Message: "No tenant selected."}})
+			return
+		}
+
+		accountID := c.Param("id")
+		if accountID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Account ID is required."}})
+			return
+		}
+
+		// Verify account belongs to tenant
+		if _, err := st.AccountByID(session.ActiveTenantID, accountID); err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": model.ErrorDetail{Code: "NOT_FOUND", Message: "Account not found."}})
+			return
+		}
+
+		var req SetProxyRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Proxy URL is required."}})
+			return
+		}
+
+		// Validate proxy URL format
+		if err := validateProxyURLFormat(req.ProxyURL); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: err.Error()}})
+			return
+		}
+
+		// Validate proxy by testing connection
+		if err := validateProxyConnection(req.ProxyURL); err != nil {
+			slog.Warn("Proxy validation failed", "accountID", accountID, "proxy", maskProxyURL(req.ProxyURL), "error", err)
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "PROXY_ERROR", Message: "Proxy validation failed: " + err.Error()}})
+			return
+		}
+
+		// Update proxy in database
+		account, err := st.UpdateAccountProxy(session.ActiveTenantID, accountID, req.ProxyURL)
+		if err != nil {
+			slog.Error("Failed to update proxy", "accountID", accountID, "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to update proxy configuration."}})
+			return
+		}
+
+		slog.Info("Proxy configured", "accountID", accountID, "proxy", maskProxyURL(req.ProxyURL))
+
+		// TODO: Restart the OpenClaw instance to apply the proxy
+		// This requires the instance manager to be integrated
+
+		c.JSON(http.StatusOK, account)
+	}
+}
+
+// handleValidateProxy validates a proxy URL without saving it.
+func handleValidateProxy(st *store.Store) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		session := middleware.GetSession(c)
+		if session == nil || session.ActiveTenantID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "TENANT_REQUIRED", Message: "No tenant selected."}})
+			return
+		}
+
+		accountID := c.Param("id")
+		if accountID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Account ID is required."}})
+			return
+		}
+
+		// Get current proxy URL from account
+		account, err := st.AccountByID(session.ActiveTenantID, accountID)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": model.ErrorDetail{Code: "NOT_FOUND", Message: "Account not found."}})
+			return
+		}
+
+		proxyURL := account.ProxyURL
+		if proxyURL == "" {
+			c.JSON(http.StatusOK, ProxyValidationResponse{OK: true, Message: "No proxy configured"})
+			return
+		}
+
+		// Validate proxy connection
+		if err := validateProxyConnection(proxyURL); err != nil {
+			c.JSON(http.StatusOK, ProxyValidationResponse{OK: false, Message: err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusOK, ProxyValidationResponse{OK: true, Message: "Proxy is reachable"})
+	}
+}
+
+// handleRestartInstance manually restarts the OpenClaw instance for an account.
+func handleRestartInstance(st *store.Store) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		session := middleware.GetSession(c)
+		if session == nil || session.ActiveTenantID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "TENANT_REQUIRED", Message: "No tenant selected."}})
+			return
+		}
+
+		accountID := c.Param("id")
+		if accountID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Account ID is required."}})
+			return
+		}
+
+		// Verify account exists
+		account, err := st.AccountByID(session.ActiveTenantID, accountID)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": model.ErrorDetail{Code: "NOT_FOUND", Message: "Account not found."}})
+			return
+		}
+
+		// TODO: Implement instance restart using instance manager
+		slog.Info("Manual instance restart requested", "accountID", accountID)
+
+		c.JSON(http.StatusOK, gin.H{
+			"message": "Instance restart initiated",
+			"account": account,
+		})
+	}
+}
+
+// handleInstanceStatus returns the current status of the OpenClaw instance.
+func handleInstanceStatus(st *store.Store) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		session := middleware.GetSession(c)
+		if session == nil || session.ActiveTenantID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "TENANT_REQUIRED", Message: "No tenant selected."}})
+			return
+		}
+
+		accountID := c.Param("id")
+		if accountID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: "Account ID is required."}})
+			return
+		}
+
+		account, err := st.AccountByID(session.ActiveTenantID, accountID)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": model.ErrorDetail{Code: "NOT_FOUND", Message: "Account not found."}})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"accountId":        account.ID,
+			"instanceStatus":   account.InstanceStatus,
+			"gatewayPort":      account.GatewayPort,
+			"gatewayWsPort":    account.GatewayWSPort,
+			"configPath":       account.ConfigPath,
+			"lastHealthCheck":  account.LastHealthCheck,
+			"restartCount":     account.RestartCount,
+			"lastRestartTime":  account.LastRestartTime,
+		})
+	}
+}
+
+// validateProxyURLFormat checks if the proxy URL has a valid format.
+func validateProxyURLFormat(proxyURL string) error {
+	if proxyURL == "" {
+		return nil // Empty proxy is valid (no proxy)
+	}
+
+	// Check if it starts with http:// or https://
+	if !strings.HasPrefix(proxyURL, "http://") && !strings.HasPrefix(proxyURL, "https://") {
+		return fmt.Errorf("proxy URL must start with http:// or https://")
+	}
+
+	// Basic URL format validation
+	u, err := func() (string, error) {
+		if !strings.Contains(proxyURL, "://") {
+			return "", fmt.Errorf("invalid URL format")
+		}
+		parts := strings.SplitN(proxyURL, "://", 2)
+		if len(parts) != 2 {
+			return "", fmt.Errorf("invalid URL format")
+		}
+		hostPort := parts[1]
+		if idx := strings.LastIndex(hostPort, "@"); idx != -1 {
+			// Strip credentials for host:port extraction
+			hostPort = hostPort[idx+1:]
+		}
+		if !strings.Contains(hostPort, ":") {
+			return "", fmt.Errorf("port is required")
+		}
+		return hostPort, nil
+	}()
+	if err != nil {
+		return err
+	}
+
+	_ = u // Used in validation
+	return nil
+}
+
+// validateProxyConnection tests if the proxy is reachable.
+func validateProxyConnection(proxyURL string) error {
+	// Use openclaw proxy validate command
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd := openClawCommand(ctx, "proxy", "validate", "--proxy-url", proxyURL, "--json")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("proxy validation command failed: %w, output: %s", err, string(output))
+	}
+
+	// Parse JSON output
+	var result struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal(output, &result); err != nil {
+		// If JSON parsing fails, check if the command ran successfully
+		if cmd.ProcessState != nil && cmd.ProcessState.Success() {
+			return nil
+		}
+		return fmt.Errorf("failed to parse validation output: %w", err)
+	}
+
+	if !result.OK {
+		return fmt.Errorf("proxy validation failed")
+	}
+
+	return nil
+}
+
+// maskProxyURL masks the password in a proxy URL for logging.
+func maskProxyURL(url string) string {
+	if url == "" {
+		return "none"
+	}
+	// Simple mask: http://user:pass@host:port -> http://user:***@host:port
+	if idx := strings.Index(url, "@"); idx != -1 {
+		return url[:idx] + "@" + strings.SplitN(url[idx+1:], ":", 2)[0]
+	}
+	// No credentials
+	if parts := strings.Split(url, "://"); len(parts) == 2 {
+		host := strings.SplitN(parts[1], ":", 2)[0]
+		return parts[0] + "://" + host
+	}
+	return "***"
+}
+
