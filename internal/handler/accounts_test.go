@@ -22,7 +22,7 @@ import (
 func TestRegisterAccountManagementIncludesDeleteRoute(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	RegisterAccountManagement(router.Group("/api/accounts"), nil)
+	RegisterAccountManagement(router.Group("/api/accounts"), nil, nil)
 
 	for _, route := range router.Routes() {
 		if route.Method == http.MethodDelete && route.Path == "/api/accounts/:id" {

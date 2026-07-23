@@ -725,36 +725,35 @@ func openClawRAGPolicyBody() string {
 }
 
 func writeOpenClawRAGWorkspace(workspaceDir, accountKey string) error {
-	if err := os.MkdirAll(workspaceDir, 0o700); err != nil {
+	// Construct the full workspace path: workspaceDir is the base "whatsapp-workspaces"
+	// directory, and we need to create/write to "whatsapp-workspaces/<accountKey>/AGENTS.md".
+	fullWorkspaceDir := filepath.Join(workspaceDir, accountKey)
+	if err := os.MkdirAll(fullWorkspaceDir, 0o700); err != nil {
 		return err
 	}
-	if err := ensureOpenClawDockerOwnership(workspaceDir); err != nil {
+	if err := ensureOpenClawDockerOwnership(fullWorkspaceDir); err != nil {
 		return err
 	}
 	// OpenClaw uses workspace "whatsapp-workspaces/<accountKey>" for the live
-	// wa agent; AGENTS.md lives at its root, not under a per-agent subdir.
-	agentDir := filepath.Join(workspaceDir, accountKey)
-	if err := os.MkdirAll(agentDir, 0o700); err != nil {
-		return err
-	}
-	if err := ensureOpenClawDockerOwnership(agentDir); err != nil {
-		return err
-	}
-	policyPath := filepath.Join(agentDir, "AGENTS.md")
+	// wa agent; AGENTS.md lives at the root of this directory.
+	policyPath := filepath.Join(fullWorkspaceDir, "AGENTS.md")
 	existing, err := os.ReadFile(policyPath)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	policy := openClawRAGPolicy()
 	updated := string(existing)
+
+	// Remove any existing whatsapp-ai-rag-policy section (both old and new formats)
 	if start := strings.Index(updated, openClawRAGPolicyStart); start >= 0 {
-		updated = strings.ReplaceAll(updated[:start], openClawRAGPolicyBody(), "") + updated[start:]
+		end := strings.Index(updated[start:], openClawRAGPolicyEnd)
+		if end >= 0 {
+			updated = updated[:start] + updated[start+len(openClawRAGPolicyEnd)+len(openClawRAGPolicyEnd):]
+		}
 	}
-	start := strings.Index(updated, openClawRAGPolicyStart)
-	end := strings.Index(updated, openClawRAGPolicyEnd)
-	if start >= 0 && end >= start {
-		updated = updated[:start] + policy + updated[end+len(openClawRAGPolicyEnd):]
-	} else if !strings.Contains(updated, openClawRAGPolicyStart) {
+
+	// Only add the policy if it's not already present
+	if !strings.Contains(updated, openClawRAGPolicyStart) {
 		if updated != "" && !strings.HasSuffix(updated, "\n") {
 			updated += "\n"
 		}
@@ -896,28 +895,66 @@ func validateOpenClawRAGAgentModelAuth(accountKey string) error {
 	return fmt.Errorf("OpenClaw Agent %s 模型认证不可用: %s", openClawRAGAgentID(accountKey), message)
 }
 
-// syncOpenClawAgentAuth copies model auth from the source auth agent to the target agent.
-// This ensures newly created WhatsApp agents have the same model authentication as
-// the globally configured auth agent.
+// syncOpenClawAgentAuth copies model auth from a source auth agent to the target agent.
+// First tries to use whatsapp-rag-auth if available; otherwise searches for any agent
+// with a valid auth database to use as the source. This ensures newly created WhatsApp
+// agents have model authentication even if the global auth agent doesn't exist yet.
 func syncOpenClawAgentAuth(targetAgentID string) error {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("获取用户主目录失败: %w", err)
 	}
-	sourceAuthDir := filepath.Join(home, ".openclaw", "agents", "whatsapp-rag-auth", "agent")
-	targetAgentDir := filepath.Join(home, ".openclaw", "agents", targetAgentID, "agent")
-
-	sourceDB := filepath.Join(sourceAuthDir, "openclaw-agent.sqlite")
+	agentsDir := filepath.Join(home, ".openclaw", "agents")
+	targetAgentDir := filepath.Join(agentsDir, targetAgentID, "agent")
 	targetDB := filepath.Join(targetAgentDir, "openclaw-agent.sqlite")
-
-	// Check if source auth database exists
-	if _, err := os.Stat(sourceDB); err != nil {
-		return fmt.Errorf("源认证数据库不存在: %w", err)
-	}
 
 	// Ensure target agent directory exists
 	if err := os.MkdirAll(targetAgentDir, 0o700); err != nil {
 		return fmt.Errorf("创建目标 agent 目录失败: %w", err)
+	}
+
+	// Try preferred source agents in order
+	var sourceDB string
+	preferredSources := []string{
+		"whatsapp-rag-auth",     // Global auth agent (preferred)
+		"whatsapp-rag-default",  // Default RAG agent
+	}
+
+	// Check preferred sources first
+	for _, sourceID := range preferredSources {
+		candidateDB := filepath.Join(agentsDir, sourceID, "agent", "openclaw-agent.sqlite")
+		if _, err := os.Stat(candidateDB); err == nil {
+			sourceDB = candidateDB
+			slog.Info("using preferred auth source", "source", sourceID)
+			break
+		}
+	}
+
+	// If no preferred source found, search for any agent with valid auth
+	if sourceDB == "" {
+		entries, err := os.ReadDir(agentsDir)
+		if err == nil {
+			for _, entry := range entries {
+				if !entry.IsDir() {
+					continue
+				}
+				// Skip the target agent itself
+				if entry.Name() == targetAgentID {
+					continue
+				}
+				candidateDB := filepath.Join(agentsDir, entry.Name(), "agent", "openclaw-agent.sqlite")
+				if info, err := os.Stat(candidateDB); err == nil && info.Size() > 0 {
+					sourceDB = candidateDB
+					slog.Info("using fallback auth source", "source", entry.Name())
+					break
+				}
+			}
+		}
+	}
+
+	// No source auth database found - agent will work but may lack model auth
+	if sourceDB == "" {
+		return fmt.Errorf("未找到有效的认证源数据库，agent 将在无模型认证情况下运行")
 	}
 
 	// Copy the auth database

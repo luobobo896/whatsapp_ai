@@ -3,8 +3,12 @@ package health
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"net/http"
+	"os"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -144,7 +148,9 @@ func (c *Checker) isProcessRunning(pid int) bool {
 	if pid == 0 {
 		return false
 	}
-	// Send signal 0 to check if process exists
+	// On Unix systems, sending signal 0 to a process checks if it exists
+	// without actually delivering a signal. FindProcess looks up the process
+	// and Signal(os.Signal(0)) validates it's running.
 	process, err := findProcess(pid)
 	if err != nil {
 		return false
@@ -158,18 +164,44 @@ func (c *Checker) isHTTPHealthy(ctx context.Context, port int) bool {
 		return false
 	}
 
-	// Simple HTTP GET to the health endpoint
-	// TODO: Implement actual HTTP check
-	return true
+	// Create a client with reasonable timeout for health checks
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+	}
+
+	// Try to reach the health endpoint
+	url := fmt.Sprintf("http://127.0.0.1:%d/health", port)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+
+	// Consider 2xx and 3xx as healthy
+	return resp.StatusCode < 400
 }
 
-// The following are placeholder implementations
-// In a real implementation, you would use os.FindProcess and similar
-
-func findProcess(pid int) (interface{}, error) {
-	return nil, nil
+// findProcess looks up a process by PID.
+func findProcess(pid int) (*os.Process, error) {
+	return os.FindProcess(pid)
 }
 
-func processRunning(p interface{}) bool {
+// processRunning checks if a process is running by attempting to signal it.
+func processRunning(p *os.Process) bool {
+	if p == nil {
+		return false
+	}
+	// Signal 0 doesn't actually send a signal but checks if the process exists
+	// On Windows, this will fail with "not supported", so we handle that gracefully
+	err := p.Signal(os.Signal(syscall.Signal(0)))
+	if err != nil {
+		// Process doesn't exist or we can't signal it
+		return false
+	}
 	return true
 }

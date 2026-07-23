@@ -16,6 +16,12 @@ const routes = [
     name: "dashboard",
     component: () => import("../views/Dashboard.vue"),
   },
+  {
+    // 404 catch-all route - must be last
+    path: "/:pathMatch(.*)*",
+    name: "not-found",
+    component: () => import("../views/NotFound.vue"),
+  },
 ];
 
 export default createRouter({

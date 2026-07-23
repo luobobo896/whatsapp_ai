@@ -19,6 +19,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"whatsapp-ai-poc/internal/instance"
+
 	"whatsapp-ai-poc/internal/embedding"
 	"whatsapp-ai-poc/internal/model"
 )
@@ -599,6 +601,32 @@ func (s *Store) AllAccounts() ([]model.AccountRow, error) {
 			return nil, err
 		}
 		list = append(list, a)
+	}
+	return list, rows.Err()
+}
+
+// AccountsForRestore returns accounts that should have their instances restored on startup.
+// Returns accounts with instance_status='running' that need to be restarted.
+func (s *Store) AccountsForRestore() ([]instance.AccountRowRef, error) {
+	rows, err := s.pool.Query(context.Background(),
+		`SELECT id, tenant_id, COALESCE(proxy_url, ''), COALESCE(config_path, '')
+		 FROM accounts
+		 WHERE instance_status = 'running'
+		 ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var list []instance.AccountRowRef
+	for rows.Next() {
+		var ref instance.AccountRowRef
+		if err := rows.Scan(&ref.ID, &ref.TenantID, &ref.ProxyURL, &ref.ConfigPath); err != nil {
+			return nil, err
+		}
+		list = append(list, ref)
+	}
+	if list == nil {
+		list = []instance.AccountRowRef{}
 	}
 	return list, rows.Err()
 }
@@ -1669,9 +1697,8 @@ func (s *Store) LoadHistoryBefore(tenantID, accountID, conversationID string, li
 }
 
 // ListConversationSummaries returns a page of conversation summaries. limit is
-// clamped by the caller (handler) to a sane max; offset is 0-based. Without the
-// LIMIT the previous implementation streamed the whole tenant's conversations,
-// which degraded as data accumulated.
+// clamped by the caller (handler) to a sane max; offset is 0-based. Uses a
+// CTE with window functions to avoid N+1 subqueries.
 func (s *Store) ListConversationSummaries(tenantID, accountID string, limit, offset int) ([]model.ConversationSummary, error) {
 	if limit <= 0 {
 		limit = 50
@@ -1679,17 +1706,46 @@ func (s *Store) ListConversationSummaries(tenantID, accountID string, limit, off
 	if offset < 0 {
 		offset = 0
 	}
-	q := `SELECT cm.conversation_id, (SELECT customer_name FROM conversation_messages cm4 WHERE cm4.tenant_id=$1 AND cm4.account_id=cm.account_id AND cm4.conversation_id=cm.conversation_id ORDER BY created_at DESC LIMIT 1) AS customer_name, cm.account_id, (SELECT content FROM conversation_messages cm2 WHERE cm2.tenant_id=$1 AND cm2.account_id=cm.account_id AND cm2.conversation_id=cm.conversation_id ORDER BY created_at DESC LIMIT 1) AS last_message, (SELECT to_char(created_at, 'YYYY-MM-DD HH24:MI:SS') FROM conversation_messages cm3 WHERE cm3.tenant_id=$1 AND cm3.account_id=cm.account_id AND cm3.conversation_id=cm.conversation_id ORDER BY created_at DESC LIMIT 1) AS last_message_at, COUNT(*) AS message_count FROM conversation_messages cm WHERE tenant_id=$1`
+	// Use a CTE with ROW_NUMBER to get the latest message for each conversation,
+	// then aggregate message counts. This runs in a single pass without N+1 subqueries.
+	q := `WITH latest_messages AS (
+		SELECT
+			conversation_id,
+			customer_name,
+			account_id,
+			content,
+			created_at,
+			ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY created_at DESC) AS rn
+		FROM conversation_messages
+		WHERE tenant_id=$1
+	),
+	message_counts AS (
+		SELECT conversation_id, COUNT(*) AS message_count
+		FROM conversation_messages
+		WHERE tenant_id=$1
+		GROUP BY conversation_id
+	)
+	SELECT
+		lm.conversation_id,
+		lm.customer_name,
+		lm.account_id,
+		lm.content AS last_message,
+		to_char(lm.created_at, 'YYYY-MM-DD HH24:MI:SS') AS last_message_at,
+		COALESCE(mc.message_count, 0) AS message_count
+	FROM latest_messages lm
+	LEFT JOIN message_counts mc ON mc.conversation_id = lm.conversation_id
+	WHERE lm.rn = 1`
+
 	args := []any{tenantID}
 	limitArg := 2
 	if accountID != "" {
-		q += ` AND cm.account_id=$2`
+		q += ` AND lm.account_id=$2`
 		args = append(args, accountID)
 		limitArg = 3
 	}
 	offsetArg := limitArg + 1
 	args = append(args, limit, offset)
-	q += fmt.Sprintf(` GROUP BY cm.conversation_id, cm.account_id ORDER BY last_message_at DESC, cm.conversation_id LIMIT $%d OFFSET $%d`, limitArg, offsetArg)
+	q += fmt.Sprintf(` ORDER BY lm.created_at DESC NULLS LAST, lm.conversation_id LIMIT $%d OFFSET $%d`, limitArg, offsetArg)
 	rows, err := s.pool.Query(context.Background(), q, args...)
 	if err != nil {
 		return nil, err
@@ -1698,12 +1754,8 @@ func (s *Store) ListConversationSummaries(tenantID, accountID string, limit, off
 	var list []model.ConversationSummary
 	for rows.Next() {
 		var s model.ConversationSummary
-		var lastAt *string
-		if err := rows.Scan(&s.ConversationID, &s.CustomerName, &s.AccountID, &s.LastMessage, &lastAt, &s.MessageCount); err != nil {
+		if err := rows.Scan(&s.ConversationID, &s.CustomerName, &s.AccountID, &s.LastMessage, &s.LastMessageAt, &s.MessageCount); err != nil {
 			return nil, err
-		}
-		if lastAt != nil {
-			s.LastMessageAt = *lastAt
 		}
 		list = append(list, s)
 	}

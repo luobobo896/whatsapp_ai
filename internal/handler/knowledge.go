@@ -99,10 +99,10 @@ func handleImportArticles(st *store.Store) gin.HandlerFunc {
 			reader, err := file.Open()
 			if err != nil {
 				c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: fmt.Sprintf("无法读取 %s。", file.Filename)}})
+			defer reader.Close()
 				return
 			}
 			data, readErr := io.ReadAll(io.LimitReader(reader, maxKnowledgeImportBytes+1))
-			reader.Close()
 			if readErr != nil || len(data) > maxKnowledgeImportBytes {
 				c.JSON(http.StatusBadRequest, gin.H{"error": model.ErrorDetail{Code: "INVALID_INPUT", Message: fmt.Sprintf("%s 超过 5MB 限制。", file.Filename)}})
 				return

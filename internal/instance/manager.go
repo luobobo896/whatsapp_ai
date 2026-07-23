@@ -3,6 +3,7 @@ package instance
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -32,9 +33,18 @@ type Manager struct {
 // Store is the interface for accessing account data.
 type Store interface {
 	AccountByID(tenantID, accountID string) (*model.AccountRow, error)
+	AccountsForRestore() ([]AccountRowRef, error)
 	UpdateAccountInstance(tenantID, accountID string, gatewayPort, gatewayWSPort, instancePID int, instanceStatus, configPath string) (*model.AccountRow, error)
 	UpdateAccountHealthCheck(accountID string) error
 	IncrementAccountRestartCount(accountID string) error
+}
+
+// AccountRowRef is a lightweight reference to an account for restore operations.
+type AccountRowRef struct {
+	ID       string
+	TenantID string
+	ProxyURL string
+	ConfigPath string
 }
 
 // New creates a new instance manager.
@@ -212,8 +222,40 @@ func (m *Manager) Get(accountID string) (*Instance, bool) {
 }
 
 // Restore restores instances from the database (called on startup).
+// Loads all accounts with instance_status='running' and restarts their instances.
 func (m *Manager) Restore(ctx context.Context) error {
-	// TODO: Load all accounts with instance_status='running' and restart them
+	// Get all accounts that need to be restored
+	accounts, err := m.store.AccountsForRestore()
+	if err != nil {
+		return fmt.Errorf("failed to get accounts for restore: %w", err)
+	}
+
+	var restoreErrors []error
+	for _, account := range accounts {
+		// Skip if instance is already running (maybe manually started)
+		if _, exists := m.Get(account.ID); exists {
+			continue
+		}
+
+		slog.Info("Restoring OpenClaw instance",
+			"accountID", account.ID,
+			"tenantID", account.TenantID,
+			"proxyURL", maskProxyURL(account.ProxyURL))
+
+		// Start the instance
+		if _, err := m.Start(ctx, account.TenantID, account.ID, account.ProxyURL); err != nil {
+			slog.Error("Failed to restore instance",
+				"accountID", account.ID,
+				"error", err)
+			restoreErrors = append(restoreErrors, err)
+		}
+	}
+
+	if len(restoreErrors) > 0 {
+		return fmt.Errorf("failed to restore %d instances: %w", len(restoreErrors), errors.Join(restoreErrors...))
+	}
+
+	slog.Info("Instance restore completed", "total", len(accounts))
 	return nil
 }
 
