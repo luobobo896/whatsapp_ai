@@ -47,8 +47,9 @@ function handleSessionExpired() {
   }
   if (typeof window !== "undefined" && window.location) {
     const current = window.location.pathname || "";
-    if (current !== "/login" && !current.startsWith("/invitations/")) {
-      window.location.assign("/login");
+    const loginPath = import.meta.env.BASE_URL + "login";
+    if (current !== loginPath && !current.startsWith(import.meta.env.BASE_URL + "invitations/")) {
+      window.location.assign(import.meta.env.BASE_URL + "login");
     }
   }
 }
