@@ -36,6 +36,9 @@ const sending = ref(false);
 const chatBody = ref(null);
 const searchInput = ref(null);
 const inspector = ref(null);
+// Failed message state for retry functionality
+const failedMessage = ref(null);
+const retrying = ref(false);
 // Upward pagination state. hasMoreOlder=false disables further fetches once the
 // backend returns a short page (fewer than `limit`) so we don't keep hammering.
 const loadingOlder = ref(false);
@@ -209,6 +212,7 @@ async function sendReply() {
 	const text = replyText.value.trim();
 	if (sending.value || !text || !selectedConv.value || !hasSendableTarget.value) return;
   sending.value = true;
+  failedMessage.value = null;
   try {
     await post(
       `/api/conversations/${encodeURIComponent(selectedConv.value.conversationId)}/send`,
@@ -218,10 +222,42 @@ async function sendReply() {
     replyText.value = "";
     await loadMessages(selectedConv.value);
   } catch (error) {
-    showToast({ tone: "error", message: messageForError(error) });
+    // Store failed message for retry
+    failedMessage.value = { content: text, error: messageForError(error) };
+    showToast({
+      tone: "error",
+      message: messageForError(error),
+      duration: 0 // Don't auto-hide for retryable errors
+    });
   } finally {
     sending.value = false;
   }
+}
+
+async function retryFailedMessage() {
+	if (!failedMessage.value || retrying.value) return;
+	retrying.value = true;
+	const text = failedMessage.value.content;
+	try {
+	  await post(
+	    `/api/conversations/${encodeURIComponent(selectedConv.value.conversationId)}/send`,
+	    { accountId: props.account.id, customerName: selectedConv.value.customerName, content: text },
+	    props.csrfToken,
+	  );
+	  failedMessage.value = null;
+	  replyText.value = "";
+	  await loadMessages(selectedConv.value);
+	  showToast({ tone: "success", message: "消息发送成功" });
+	} catch (error) {
+	  showToast({ tone: "error", message: `重试失败: ${messageForError(error)}` });
+	} finally {
+	  retrying.value = false;
+	}
+}
+
+function discardFailedMessage() {
+  failedMessage.value = null;
+  replyText.value = "";
 }
 
 function handleKeydown(event) {
@@ -369,6 +405,13 @@ loadConversations();
       </div>
 
       <footer v-if="selectedConv" class="chat-composer">
+        <div v-if="failedMessage" class="chat-composer-failed">
+          <span><ShieldCheck :size="14" /> 消息发送失败: {{ failedMessage.error }}</span>
+          <div class="chat-composer-failed-actions">
+            <el-button size="small" type="primary" :loading="retrying" @click="retryFailedMessage">重试</el-button>
+            <el-button size="small" @click="discardFailedMessage">丢弃</el-button>
+          </div>
+        </div>
         <div class="chat-composer-topline">
           <span :class="{ 'is-warning': !hasSendableTarget }"><ShieldCheck :size="14" /> {{ recipientHint }}</span>
           <span>Enter 发送 · Shift + Enter 换行</span>
@@ -379,11 +422,11 @@ loadConversations();
             class="chat-composer-input"
             type="textarea"
             :rows="2"
-            :disabled="!hasSendableTarget"
+            :disabled="!hasSendableTarget || !!failedMessage"
             placeholder="输入人工回复..."
             @keydown="handleKeydown"
           />
-          <el-button type="primary" class="chat-send-button" :icon="SendHorizontal" :loading="sending" :disabled="!canSend" @click="sendReply">发送</el-button>
+          <el-button type="primary" class="chat-send-button" :icon="SendHorizontal" :loading="sending || retrying" :disabled="!canSend" @click="sendReply">发送</el-button>
         </div>
       </footer>
     </main>
@@ -446,5 +489,22 @@ loadConversations();
 }
 .chat-load-more-loading {
   color: #128c7e;
+}
+.chat-composer-failed {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 14px;
+  margin-bottom: 8px;
+  border-radius: 8px;
+  background: #fef2f2;
+  color: #dc2626;
+  border: 1px solid #fca5a5;
+  font-size: 13px;
+}
+.chat-composer-failed-actions {
+  display: flex;
+  gap: 8px;
 }
 </style>
