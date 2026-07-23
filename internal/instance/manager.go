@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"whatsapp-ai/source/internal/model"
-	"whatsapp-ai/source/internal/port"
+	"whatsapp-ai-poc/internal/model"
+	"whatsapp-ai-poc/internal/port"
 )
 
 const (
