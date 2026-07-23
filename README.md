@@ -119,7 +119,10 @@ go build ./cmd/server
 ./server
 
 # 5. （可选）启动 RAG MCP Server（OpenClaw 集成用）
-cd cmd/rag-mcp-server && npm install && WHATSAPP_AI_ACCOUNT_ID=<account_id> node index.mjs
+# 先通过 Web 界面创建一个客服账号，然后从账号列表获取其 ID（UUID 格式，24 位十六进制字符串）
+# 或直接调用 POST /api/accounts 创建，从响应中获取 id 字段
+# 每个 WhatsApp 账号需要单独启动一个 MCP Server 进程
+cd cmd/rag-mcp-server && npm install && WHATSAPP_AI_ACCOUNT_ID=<从 Web 界面或 API 响应中获取的账号 ID> node index.mjs
 ```
 
 访问 `http://localhost:8790`，`GET /health` → `{"status":"ok"}`。
@@ -137,7 +140,7 @@ cd cmd/rag-mcp-server && npm install && WHATSAPP_AI_ACCOUNT_ID=<account_id> node
 | `ADMIN_PASSWORD` | （首次启动必填） | 种子管理员密码 |
 | `COOKIE_SECURE` | `true` | 会话 Cookie 的 Secure 属性；本地 HTTP 开发时显式设为 `false` |
 | `INTERNAL_API_TOKEN` | （必填） | 内部 API Bearer token，OpenClaw MCP 服务调用时使用 |
-| `WHATSAPP_AI_ACCOUNT_ID` | （MCP 必填） | RAG MCP 进程绑定的单个 WhatsApp 账号 ID；每个账号单独启动 MCP 进程 |
+| `WHATSAPP_AI_ACCOUNT_ID` | （MCP 必填） | RAG MCP 进程绑定的单个 WhatsApp 账号 ID；**从账号创建 API 响应或 Web 界面账号列表获取**（24 位十六进制 UUID，如 `a1b2c3d4e5f6g7h8i9j0k1l2`）；每个账号单独启动 MCP 进程 |
 
 ## API 总览
 
@@ -244,7 +247,7 @@ OpenClaw 本身支持以下 `channels.whatsapp.dmPolicy` 值：
 
 | 值 | 行为 |
 |---|---|
-| `pairing` | 新号码首次发消息需生成配对码，人工执行 `openclaw pairing approve whatsapp <code>` 批准后才能对话 |
+| `pairing` | 新号码首次发消息需生成配对码，人工执行 `openclaw pairing approve whatsapp <code>` 批准后才能对话（`<code>` 为系统生成的配对码） |
 | `allowlist` | 仅 `allowFrom` 列表内的号码可对话 |
 | `open` | 任何号码可直接对话，无需审核 |
 | `disabled` | 禁止私聊 |
@@ -260,12 +263,15 @@ openclaw gateway restart
 模型 key 不放在 WhatsApp AI `.env`，而是写入每个 OpenClaw agent 的认证存储：
 
 ```bash
+# <agent-id>: OpenClaw agent ID，从 openclaw agents list 获取（格式如 whatsapp-wa_a1b2c3d4）
 openclaw models auth --agent <agent-id> paste-api-key --provider deepseek
 ```
 
 完整部署步骤见 `docs/deployment/openclaw-rag.md`。
 
 ## ⚠️ OpenClaw 集成关键配置与排障（接手必读，配错会静默瘫痪）
+
+> **命名说明**：下文中的 `<key>` 指代账号的 8 位十六进制标识（不含 `wa_` 前缀），从账号 API 响应的 `account_key` 字段获取（如 `a1b2c3d4`）。完整 `account_key` 格式为 `wa_<key>`（如 `wa_a1b2c3d4`）。`whatsapp-wa_<key>` 是 OpenClaw 实际运行的 agent ID。
 
 本节记录过线上事故。OpenClaw 集成有多个「配错不报错、只是消息收不到回复 / 不走知识库」的点。**它们全部同源：server（`internal/handler/accounts.go`）按 `whatsapp-rag-<key>` 命名写配置，但 OpenClaw 扫码登录后实际运行、真正处理 WhatsApp 消息的 agent 是 `whatsapp-wa_<key>`、其 workspace 是 `whatsapp-workspaces/wa_<key>/`——命名错位导致 auth、persona 等配置都没落到干活的 agent 上。** 接手前务必读完。
 
@@ -278,7 +284,7 @@ OpenClaw 把模型凭证隔离到 agent 级别。扫码登录后 OpenClaw 自动
 ```bash
 # 检查（Profiles 必须非空）
 openclaw models auth --agent whatsapp-wa_<key> list
-# 绑定（key 从 stdin 读，切勿放命令行）
+# 绑定（API key 从 stdin 读，切勿放命令行；<key-file> 为包含 DeepSeek API Key 的文件）
 openclaw models auth --agent whatsapp-wa_<key> paste-api-key --provider deepseek --profile-id deepseek:whatsapp-ai < <key-file>
 ```
 

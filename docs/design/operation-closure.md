@@ -5,6 +5,9 @@
 人工客服在会话工作台发送文本时，服务端只接受当前租户中已连接的客服账号，并将会话标识规范化为 E.164 WhatsApp 电话号码。服务端调用：
 
 ```sh
+# <accountKey>: 从账号 API 响应或数据库 accounts 表的 account_key 字段获取（格式：wa_ + 8位十六进制，如 wa_a1b2c3d4）
+# <phone>: 客户 E.164 格式电话号码（如 +8613800138000）
+# <content>: 人工客服输入的回复文本内容
 openclaw message send --channel whatsapp --account <accountKey> --target <phone> --message <content> --json
 ```
 
