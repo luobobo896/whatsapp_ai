@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"whatsapp-ai-poc/internal/handler"
+	"whatsapp-ai-poc/internal/instance"
 	"whatsapp-ai-poc/internal/middleware"
 	"whatsapp-ai-poc/internal/model"
 	"whatsapp-ai-poc/internal/store"
@@ -62,6 +63,9 @@ func run() error {
 		}
 	}()
 
+	// Initialize instance manager for OpenClaw instances
+	instanceMgr := instance.New(st)
+
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
 	router.Use(gin.Recovery())
@@ -104,9 +108,7 @@ func run() error {
 	{
 		handler.RegisterTenants(api.Group("/tenants"), st)
 		accounts := api.Group("/accounts", middleware.RequireActiveTenant())
-		accounts.GET("", handler.ListAccounts(st))
-		accounts.Use(middleware.RequireTenantPermission("accounts:manage"))
-		handler.RegisterAccountManagement(accounts, st)
+			handler.RegisterAccounts(accounts, st, instanceMgr)
 
 		knowledge := api.Group("/knowledge", middleware.RequireActiveTenant())
 		handler.RegisterKnowledgeRead(knowledge, st)

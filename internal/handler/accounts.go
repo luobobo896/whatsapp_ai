@@ -24,6 +24,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5"
 
+	"whatsapp-ai-poc/internal/instance"
 	"whatsapp-ai-poc/internal/middleware"
 	"whatsapp-ai-poc/internal/model"
 	"whatsapp-ai-poc/internal/store"
@@ -1864,10 +1865,10 @@ func sendOpenClawWhatsAppMessage(accountKey, conversationID, content string) err
 	return fmt.Errorf("OpenClaw 发送失败: %s", message)
 }
 
-func RegisterAccounts(r *gin.RouterGroup, st *store.Store) {
+func RegisterAccounts(r *gin.RouterGroup, st *store.Store, instanceMgr *instance.Manager) {
 	startWhatsAppStatusSyncWorker(st)
 	r.GET("", handleListAccounts(st))
-	RegisterAccountManagement(r, st)
+	RegisterAccountManagement(r, st, instanceMgr)
 }
 
 func ListAccounts(st *store.Store) gin.HandlerFunc {
@@ -1876,7 +1877,7 @@ func ListAccounts(st *store.Store) gin.HandlerFunc {
 
 // RegisterAccountManagement registers account mutations that require the
 // accounts:manage tenant permission.
-func RegisterAccountManagement(r *gin.RouterGroup, st *store.Store) {
+func RegisterAccountManagement(r *gin.RouterGroup, st *store.Store, instanceMgr *instance.Manager) {
 	r.POST("", handleCreateAccount(st))
 	r.PATCH("/:id", handleUpdateAccount(st))
 	r.DELETE("/:id", handleDeleteAccount(st))
@@ -1884,9 +1885,9 @@ func RegisterAccountManagement(r *gin.RouterGroup, st *store.Store) {
 	r.GET("/:id/qr-status", handleQrStatus(st))
 	r.POST("/:id/disconnect", handleDisconnect(st))
 	// Proxy configuration endpoints
-	r.PUT("/:id/proxy", handleSetProxy(st))
+	r.PUT("/:id/proxy", handleSetProxy(st, instanceMgr))
 	r.GET("/:id/proxy/validate", handleValidateProxy(st))
-	r.POST("/:id/instance/restart", handleRestartInstance(st))
+	r.POST("/:id/instance/restart", handleRestartInstance(st, instanceMgr))
 	r.GET("/:id/instance/status", handleInstanceStatus(st))
 }
 
@@ -2392,7 +2393,7 @@ type ProxyValidationResponse struct {
 }
 
 // handleSetProxy sets the proxy configuration for an account and restarts the instance.
-func handleSetProxy(st *store.Store) gin.HandlerFunc {
+func handleSetProxy(st *store.Store, instanceMgr *instance.Manager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		session := middleware.GetSession(c)
 		if session == nil || session.ActiveTenantID == "" {
@@ -2441,8 +2442,16 @@ func handleSetProxy(st *store.Store) gin.HandlerFunc {
 
 		slog.Info("Proxy configured", "accountID", accountID, "proxy", maskProxyURL(req.ProxyURL))
 
-		// TODO: Restart the OpenClaw instance to apply the proxy
-		// This requires the instance manager to be integrated
+		// Restart the OpenClaw instance to apply the proxy
+		if instanceMgr != nil {
+			ctx := context.Background()
+			if err := instanceMgr.Restart(ctx, accountID); err != nil {
+				slog.Warn("Failed to restart instance after proxy configuration", "accountID", accountID, "error", err)
+				// Don't fail the request if restart fails; proxy is saved and will apply on next startup
+			} else {
+				slog.Info("Instance restarted for proxy configuration", "accountID", accountID)
+			}
+		}
 
 		c.JSON(http.StatusOK, account)
 	}
@@ -2487,7 +2496,7 @@ func handleValidateProxy(st *store.Store) gin.HandlerFunc {
 }
 
 // handleRestartInstance manually restarts the OpenClaw instance for an account.
-func handleRestartInstance(st *store.Store) gin.HandlerFunc {
+func handleRestartInstance(st *store.Store, instanceMgr *instance.Manager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		session := middleware.GetSession(c)
 		if session == nil || session.ActiveTenantID == "" {
@@ -2508,8 +2517,20 @@ func handleRestartInstance(st *store.Store) gin.HandlerFunc {
 			return
 		}
 
-		// TODO: Implement instance restart using instance manager
-		slog.Info("Manual instance restart requested", "accountID", accountID)
+		if instanceMgr == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": model.ErrorDetail{Code: "SERVICE_UNAVAILABLE", Message: "Instance manager not available."}})
+			return
+		}
+
+		// Restart the instance using the instance manager
+		ctx := context.Background()
+		if err := instanceMgr.Restart(ctx, accountID); err != nil {
+			slog.Error("Failed to restart instance", "accountID", accountID, "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "INTERNAL", Message: "Failed to restart instance: " + err.Error()}})
+			return
+		}
+
+		slog.Info("Instance restarted successfully", "accountID", accountID)
 
 		c.JSON(http.StatusOK, gin.H{
 			"message": "Instance restart initiated",
