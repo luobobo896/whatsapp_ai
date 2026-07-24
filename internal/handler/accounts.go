@@ -2312,8 +2312,8 @@ func handleDisconnect(st *store.Store) gin.HandlerFunc {
 		}
 		_, err = disableOpenClawRAGAccount(acct.AccountKey)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": model.ErrorDetail{Code: "OPENCLAW_ERROR", Message: fmt.Sprintf("停用知识库客服失败: %v", err)}})
-			return
+			// Log warning but don't fail the disconnect - WhatsApp is already disconnected
+			slog.Warn("disconnect: failed to disable RAG account (continuing anyway)", "account_id", accountID, "account_key", acct.AccountKey, "error", err)
 		}
 		qrCacheMu.Lock()
 		stopQrSession(qrCache[accountID])
